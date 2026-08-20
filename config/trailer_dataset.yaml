@@ -1,0 +1,19 @@
+# Trailer Back Detection Dataset Configuration
+# YOLOv8 dataset format
+
+# Paths (relative to this file or absolute)
+path: yolo_trailer_dataset  # Root dataset directory
+train: images/train  # Training images (relative to path)
+val: images/val      # Validation images (relative to path)
+
+# Classes
+names:
+  0: trailer_back  # Single class: back side of trailer
+
+# Number of classes
+nc: 1
+
+
+
+
+

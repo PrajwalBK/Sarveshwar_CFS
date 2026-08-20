@@ -1,0 +1,50 @@
+opencv-python>=4.8.0,<4.10.0
+numpy>=1.21.0,<2.0.0
+pyyaml>=6.0
+easyocr>=1.7.0
+flask>=2.3.0
+prometheus-client>=0.18.0
+azure-servicebus>=7.11.0
+boto3>=1.28.0
+azure-storage-blob>=12.19.0
+kafka-python>=2.0.2
+paho-mqtt>=1.6.1
+geojson>=3.1.0
+shapely>=2.0.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.0
+requests>=2.31.0
+# Database support (SQLite is built-in, but listed for clarity)
+# GPS sensor support (optional, for GPS-enabled recording)
+pyserial>=3.5
+pynmea2>=1.19.0
+# YOLOv8 detection (Ultralytics)
+ultralytics>=8.0.0
+
+# TensorRT and CUDA (install separately on Jetson with JetPack)
+# nvidia-tensorrt>=8.0.0
+# pycuda>=2021.1
+# oLmOCR (Qwen2.5-VL) - Optional, for vertical text recognition
+# transformers>=4.49.0
+# qwen-vl-utils>=0.0.8
+# Pillow>=9.0.0
+#
+# PyTorch on Jetson: use NVIDIA wheels for your JetPack (do NOT use x86 cu12 index on device).
+#   https://developer.download.nvidia.com/compute/redist/jp/
+# After flashing, typical install pattern is pip from the JP version-specific URL in NVIDIA docs.
+# On x64 Linux with NVIDIA GPU: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# (pick the cu* version that matches `nvidia-smi` driver CUDA capability).
+# torch>=2.0.0
+# torchvision>=0.15.0
+
+# Deep Learning-based BEV (Bird's-Eye View) - Optional — use same PyTorch install as above.
+
+# Monocular Depth Estimation - Optional, for improved 3D projection accuracy
+# Required for depth-based 3D projection method (Option A: Monocular Depth Estimation)
+# Install PyTorch first (see above), then:
+# torch>=2.0.0
+# torchvision>=0.15.0
+# transformers>=4.49.0  # For Depth Anything model (alternative to MiDaS)
+# Note: MiDaS is loaded via torch.hub, no additional install needed
