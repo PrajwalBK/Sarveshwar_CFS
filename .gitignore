@@ -13,7 +13,6 @@ build/
 .env
 *.log
 out/
-runs/
 data/
 recordings/
 Test_Data/
@@ -25,9 +24,6 @@ Container*
 *.tar.gz
 *.7z
 *.rar
-*.pt
-*.engine
-*.onnx
 *.weights
 *.mp4
 *.mov
@@ -40,3 +36,6 @@ config/calib/*.json
 scratch/
 *.db
 *.sqlite
+
+# Exclude files exceeding GitHub 100MB limit
+models/yolov8m.onnx
