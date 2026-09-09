@@ -1,0 +1,47 @@
+from sqlalchemy import create_engine, event, inspect, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from app.database.models import Base, SchemaVersion
+
+SCHEMA_VERSION = 1
+
+
+class Database:
+    def __init__(self, url: str):
+        options = {'pool_pre_ping': True}
+        if url.startswith('sqlite'):
+            options['connect_args'] = {'check_same_thread': False}
+            if ':memory:' in url:
+                options['poolclass'] = StaticPool
+        else:
+            options['connect_args'] = {'connect_timeout': 3, 'read_timeout': 5, 'write_timeout': 5}
+            options['pool_recycle'] = 1800
+        self.engine = create_engine(url, **options)
+        if url.startswith('sqlite'):
+            @event.listens_for(self.engine, 'connect')
+            def enable_foreign_keys(connection, _):
+                connection.execute('PRAGMA foreign_keys=ON')
+        self.sessions = sessionmaker(self.engine, expire_on_commit=False)
+
+    def initialize(self):
+        existing = set(inspect(self.engine).get_table_names())
+        if SchemaVersion.__tablename__ in existing:
+            self.check()
+        elif existing.intersection(Base.metadata.tables):
+            raise RuntimeError('Unversioned Gate tables exist; review schema before initializing')
+        Base.metadata.create_all(self.engine)
+        with self.sessions.begin() as session:
+            version = session.get(SchemaVersion, 1)
+            if version is None:
+                session.add(SchemaVersion(id=1, version=SCHEMA_VERSION))
+            elif version.version != SCHEMA_VERSION:
+                raise RuntimeError('Database schema version mismatch; explicit migration required')
+
+    def check(self):
+        with self.sessions() as session:
+            version = session.scalar(select(SchemaVersion.version).where(SchemaVersion.id == 1))
+            if version != SCHEMA_VERSION:
+                raise RuntimeError('Initialize the database schema before starting processing')
+
+    def close(self):
+        self.engine.dispose()

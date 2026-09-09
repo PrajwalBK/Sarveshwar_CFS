@@ -1,0 +1,128 @@
+from pathlib import Path
+from typing import Literal
+import os
+
+import yaml
+from dotenv import dotenv_values
+from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+Direction = Literal['ENTRY', 'EXIT', 'UNKNOWN']
+
+
+class CameraConfig(BaseModel):
+    id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
+    name: str = Field(max_length=100)
+    gate_id: str = Field(max_length=64, min_length=1)
+    source_env: str = Field(pattern=r'^[A-Z][A-Z0-9_]+$', max_length=100)
+    source_type: Literal['rtsp', 'file'] = 'rtsp'
+    enabled: bool = True
+    direction: Direction = 'UNKNOWN'
+    capture_fps: float = Field(default=15, gt=0, le=120)
+    inference_fps: float | None = Field(default=None, gt=0, le=60)
+    frame_skip: int = Field(default=0, ge=0, le=120)
+    loop_file: bool = False
+    # Normalized region inside a detected box; whole box by default.
+    ocr_roi: tuple[float, float, float, float] = (0, 0, 1, 1)
+    # Optional crossing of normalized x or y, with a deadband.
+    line_axis: Literal['x', 'y'] | None = None
+    line_position: float = Field(default=0.5, gt=0, lt=1)
+    line_deadband: float = Field(default=0.03, ge=0, lt=0.5)
+    positive_crossing: Literal['ENTRY', 'EXIT'] = 'ENTRY'
+
+    @model_validator(mode='after')
+    def validate_geometry(self):
+        x1, y1, x2, y2 = self.ocr_roi
+        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+            raise ValueError('ocr_roi must be a normalized nonempty rectangle')
+        return self
+
+
+class CameraSourceConfig(BaseModel):
+    id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,64}$')
+    name: str = Field(max_length=100, min_length=1)
+    source_env: str = Field(pattern=r'^[A-Z][A-Z0-9_]+$', max_length=100)
+    enabled: bool = True
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file='.env', extra='ignore')
+    deployment_mode: Literal['development', 'edge', 'test'] = 'development'
+    database_url: SecretStr = SecretStr('mysql+pymysql://gate:gate@127.0.0.1:3306/gate_module')
+    cameras_file: Path = Path('config/cameras.yaml')
+    pipeline_enabled: bool = True
+    model_backend: Literal['pytorch', 'onnx', 'tensorrt'] = 'pytorch'
+    model_path: Path = Path('models/best.pt')
+    model_device: str = 'cpu'
+    model_image_size: int = Field(default=640, ge=32)
+    class_aliases: dict[str, str] = {'cointainer': 'container', 'container_object': 'container', 'feet': 'feet'}
+    target_classes: list[str] = ['container', 'trailer', 'truck', 'vehicle', 'feet', 'cointainer', 'container_object']
+    ocr_classes: list[str] = ['container', 'trailer', 'cointainer', 'container_object', 'feet']
+
+    ocr_engine: Literal['easyocr', 'olmocr', 'qwen2_vl', 'qwen2vl'] = 'easyocr'
+    ocr_model_name: str = 'Qwen/Qwen2-VL-2B-Instruct'
+    ocr_gpu: bool = False
+    ocr_download_enabled: bool = False
+    ocr_model_directory: Path = Path('models/easyocr')
+    inference_fps: float = Field(default=3, gt=0, le=60)
+    confidence_threshold: float = Field(default=0.35, ge=0, le=1)
+    ocr_min_confidence: float = Field(default=0.6, ge=0, le=1)
+    min_track_hits: int = Field(default=3, ge=1)
+    ocr_confirmations: int = Field(default=2, ge=1)
+    ocr_max_attempts: int = Field(default=4, ge=1)
+    ocr_interval_seconds: float = Field(default=1, gt=0)
+    ocr_queue_size: int = Field(default=8, ge=1, le=100)
+    dedup_seconds: float = Field(default=30, gt=0)
+    track_ttl_seconds: float = Field(default=5, gt=0)
+    snapshot_directory: Path = Path('snapshots')
+    upload_directory: Path = Path('uploads')
+    max_upload_mb: int = Field(default=2048, ge=1, le=20480)
+    cors_origins: list[str] = ['http://localhost:4200', 'http://127.0.0.1:4200']
+    open_timeout_ms: int = Field(default=5000, ge=100, le=30000)
+    read_timeout_ms: int = Field(default=3000, ge=100, le=30000)
+    reconnect_initial_seconds: float = Field(default=1, gt=0)
+    reconnect_max_seconds: float = Field(default=30, gt=0)
+    max_frame_width: int = Field(default=1920, ge=320, le=4096)
+    prosper_enabled: bool = False
+    prosper_api_base_url: str = 'http://syapi.prosperassettracking.com'
+    prosper_site_id: str = ''
+    prosper_api_key: SecretStr | None = None
+    prosper_bearer_token: SecretStr | None = None
+    prosper_site_code: str | None = None
+    prosper_username: str | None = None
+    prosper_email: str | None = None
+    prosper_password: SecretStr | None = None
+    prosper_device_uuid: str | None = None
+    prosper_max_retries: int = Field(default=5, ge=1, le=20)
+    prosper_queue_size: int = Field(default=200, ge=1, le=1000)
+
+    @model_validator(mode='after')
+    def validate_settings(self):
+        if self.ocr_max_attempts < self.ocr_confirmations:
+            raise ValueError('ocr_max_attempts must cover ocr_confirmations')
+        if self.deployment_mode != 'test' and not self.database_url.get_secret_value().startswith('mysql+pymysql://'):
+            raise ValueError('Use MySQL; SQLite is supported only in test mode')
+        return self
+
+    def cameras(self) -> list[CameraConfig]:
+        data = yaml.safe_load(self.cameras_file.read_text(encoding='utf-8')) or {}
+        cameras = [CameraConfig.model_validate(c) for c in data.get('cameras', [])]
+        if len(cameras) > 8 or len({c.id for c in cameras}) != len(cameras):
+            raise ValueError('Configure at most eight cameras with unique IDs')
+        return cameras
+
+    def camera_sources(self, cameras: list[CameraConfig] | None = None) -> list[CameraSourceConfig]:
+        data = yaml.safe_load(self.cameras_file.read_text(encoding='utf-8')) or {}
+        configured = data.get('camera_sources')
+        if configured is None:
+            configured = [{'id': c.id, 'name': c.name, 'source_env': c.source_env, 'enabled': c.enabled}
+                          for c in (cameras or self.cameras())]
+        sources = [CameraSourceConfig.model_validate(item) for item in configured]
+        if len(sources) > 32 or len({source.id for source in sources}) != len(sources):
+            raise ValueError('Configure at most 32 camera sources with unique IDs')
+        return sources
+
+
+def resolve_source(camera: CameraConfig | CameraSourceConfig) -> str:
+    # Explicit lookup avoids requiring every possible camera key in Settings.
+    return os.environ.get(camera.source_env, dotenv_values('.env').get(camera.source_env) or '')

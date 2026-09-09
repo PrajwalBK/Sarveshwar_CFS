@@ -1,0 +1,156 @@
+import { Component, computed, DestroyRef, inject, signal } from '@angular/core';
+import { DatePipe } from '@angular/common';
+import { HttpErrorResponse, HttpEventType } from '@angular/common/http';
+import { FormsModule } from '@angular/forms';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { catchError, exhaustMap, forkJoin, merge, of, Subject, timer, timeout } from 'rxjs';
+import { GateApi, Camera, CameraSource, EventPage, EventDetail, Health, Metrics, UploadState, PlaybackAction } from './gate-api.service';
+import { CameraGridComponent } from './camera-grid.component';
+import { EventTableComponent } from './event-table.component';
+import { EventDetailComponent } from './event-detail.component';
+import { SystemHealthComponent } from './system-health.component';
+
+@Component({
+  selector: 'gate-app', standalone: true,
+  imports: [FormsModule, DatePipe, CameraGridComponent, EventTableComponent, EventDetailComponent, SystemHealthComponent],
+  templateUrl: './app.component.html'
+})
+export class AppComponent {
+  private api = inject(GateApi);
+  private destroy = inject(DestroyRef);
+  private refresh = new Subject<void>();
+  activeTab = signal<'overview' | 'events' | 'detail'>('overview');
+  cameras = signal<Camera[]>([]);
+  cameraSources = signal<CameraSource[]>([]);
+  page = signal<EventPage>({items: [], total: 0, limit: 25, offset: 0});
+  health = signal<Health | null>(null);
+  metrics = signal<Metrics | null>(null);
+  detail = signal<EventDetail | null>(null);
+  error = signal('');
+  eventsError = signal('');
+  notice = signal('');
+  lastUpdated = signal<Date | null>(null);
+  refreshToken = signal(0);
+  uploads = signal<Partial<Record<string, UploadState>>>({});
+  controlsBusy = signal<Record<string, boolean>>({});
+  loading = signal(true);
+  videoCount = computed(() => this.cameras().filter(c => c.source_type === 'file').length);
+  playingCount = computed(() => this.cameras().filter(c => c.playback_status === 'PLAYING').length);
+  containerFilter = '';
+  typeFilter = '';
+  offset = 0;
+
+  constructor() {
+    this.syncFromHash();
+    window.addEventListener('hashchange', () => this.syncFromHash());
+
+    // SQL failures must not hide camera slots, upload controls or machine health.
+    merge(timer(0, 2500), this.refresh).pipe(
+      exhaustMap(() => forkJoin({cameras: this.api.cameras(), sources: this.api.cameraSources(), health: this.api.health(), metrics: this.api.metrics(),
+        events: this.api.events(this.offset, this.containerFilter, this.typeFilter).pipe(catchError(() => of(null)))}).pipe(timeout(15000), catchError(() => of(null)))),
+      takeUntilDestroyed(this.destroy)
+    ).subscribe(data => {
+      this.loading.set(false);
+      if (!data) { this.error.set('Backend disconnected. Start the Gate service to upload and play videos.'); return; }
+      this.error.set(''); this.cameras.set(data.cameras); this.cameraSources.set(data.sources); this.health.set(data.health); this.metrics.set(data.metrics);
+      if (data.events) { this.page.set(data.events); this.eventsError.set(''); }
+      else this.eventsError.set('Event storage is unavailable. You can still upload and preview videos.');
+      this.lastUpdated.set(new Date());
+    });
+    timer(0, 1000).pipe(takeUntilDestroyed(this.destroy)).subscribe(() => this.refreshToken.update(n => n + 1));
+  }
+
+  private syncFromHash() {
+    const hash = window.location.hash.replace(/^#/, '');
+    if (hash === 'events') {
+      this.activeTab.set('events');
+    } else if (hash.startsWith('event-')) {
+      const eventId = hash.slice(6);
+      if (eventId && (!this.detail() || this.detail()?.id !== eventId)) {
+        this.select(eventId);
+      } else {
+        this.activeTab.set('detail');
+      }
+    } else if (hash === 'overview') {
+      this.activeTab.set('overview');
+    }
+  }
+
+  setTab(tab: 'overview' | 'events' | 'detail') {
+    this.activeTab.set(tab);
+    if (tab === 'overview') {
+      window.location.hash = 'overview';
+    } else if (tab === 'events') {
+      window.location.hash = 'events';
+    } else if (tab === 'detail' && this.detail()) {
+      window.location.hash = `event-${this.detail()!.id}`;
+    }
+  }
+
+  filter() { this.offset = 0; this.refresh.next(); }
+  movePage(delta: number) { this.offset = Math.max(0, this.offset + delta); this.refresh.next(); }
+  
+  select(id: string) {
+    this.api.event(id).pipe(takeUntilDestroyed(this.destroy)).subscribe({
+      next: d => {
+        this.detail.set(d);
+        this.activeTab.set('detail');
+        window.location.hash = `event-${id}`;
+      },
+      error: () => this.notice.set('Event details could not be loaded.')
+    });
+  }
+
+  backToEvents() {
+    this.activeTab.set('events');
+    window.location.hash = 'events';
+  }
+
+  uploadVideo({id, file}: {id: string; file: File}) {
+    if (this.uploads()[id]?.busy) return;
+    const maximum = this.health()?.max_upload_mb ?? 2048;
+    if (!/\.(mp4|avi|mov|mkv|webm|m4v)$/i.test(file.name) || file.size > maximum * 1024 * 1024) {
+      this.setUpload(id, {busy: false, progress: 0, error: true, message: `Choose a supported video smaller than ${maximum} MB.`}); return;
+    }
+    this.setUpload(id, {busy: true, progress: 0, error: false, message: 'Uploading video…'});
+    this.api.uploadVideo(id, file).pipe(takeUntilDestroyed(this.destroy)).subscribe({
+      next: event => {
+        if (event.type === HttpEventType.UploadProgress) {
+          const progress = Math.round(100 * event.loaded / (event.total || file.size));
+          this.setUpload(id, {busy: true, progress, error: false, message: progress === 100 ? 'Checking video…' : `Uploading ${progress}%`});
+        } else if (event.type === HttpEventType.Response) {
+          this.setUpload(id, {busy: false, progress: 100, error: false, message: 'Ready. Press Play to begin.'}); this.refresh.next();
+        }
+      },
+      error: (error: HttpErrorResponse) => this.setUpload(id, {busy: false, progress: 0, error: true, message: this.errorMessage(error, 'Upload failed. Please try again.')})
+    });
+  }
+  playback({id, action}: {id: string; action: PlaybackAction}) {
+    if (this.controlsBusy()[id]) return;
+    this.controlsBusy.update(value => ({...value, [id]: true}));
+    this.api.playback(id, action).pipe(takeUntilDestroyed(this.destroy)).subscribe({
+      next: () => { this.controlsBusy.update(value => ({...value, [id]: false})); this.refresh.next(); },
+      error: (error: HttpErrorResponse) => { this.controlsBusy.update(value => ({...value, [id]: false})); this.notice.set(this.errorMessage(error, 'Playback control failed.')); }
+    });
+  }
+  selectCamera({id, sourceId}: {id: string; sourceId: string}) {
+    if (!sourceId || this.controlsBusy()[id]) return;
+    this.controlsBusy.update(value => ({...value, [id]: true}));
+    this.api.selectCamera(id, sourceId).pipe(takeUntilDestroyed(this.destroy)).subscribe({
+      next: () => { this.controlsBusy.update(value => ({...value, [id]: false})); this.notice.set('Camera source switched.'); this.refresh.next(); },
+      error: (error: HttpErrorResponse) => { this.controlsBusy.update(value => ({...value, [id]: false})); this.notice.set(this.errorMessage(error, 'Camera could not be selected.')); this.refresh.next(); }
+    });
+  }
+  playAll() {
+    this.api.playAll().pipe(takeUntilDestroyed(this.destroy)).subscribe({next: value => {
+      this.notice.set(`Started ${value.results.filter(r => r.success).length} video inputs.`); this.refresh.next();
+    }, error: () => this.notice.set('Could not start the video inputs.')});
+  }
+  startProcessing() {
+    this.api.startProcessing().pipe(takeUntilDestroyed(this.destroy)).subscribe({next: () => {
+      this.notice.set('Loading the configured detection and OCR models…'); this.refresh.next();
+    }, error: (error: HttpErrorResponse) => this.notice.set(this.errorMessage(error, 'AI processing could not start.'))});
+  }
+  private setUpload(id: string, state: UploadState) { this.uploads.update(value => ({...value, [id]: state})); }
+  private errorMessage(error: HttpErrorResponse, fallback: string) { return typeof error.error?.detail === 'string' ? error.error.detail : fallback; }
+}

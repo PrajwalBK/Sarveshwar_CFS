@@ -1,3 +1,0 @@
-# Trailer Vision Edge Application
-
-

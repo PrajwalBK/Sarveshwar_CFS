@@ -1,2 +1,0 @@
-"""GateVision domain module."""
-

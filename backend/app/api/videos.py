@@ -1,0 +1,99 @@
+import asyncio
+from pathlib import Path
+from typing import Literal
+from urllib.parse import unquote
+from uuid import uuid4
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+from app.api.cameras import worker
+
+router = APIRouter(prefix='/api', tags=['video inputs'])
+EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'}
+
+
+@router.post('/cameras/{camera_id}/video')
+async def upload_video(camera_id: str, request: Request):
+    worker(request, camera_id)
+    runtime = request.app.state.runtime
+    filename = unquote(request.headers.get('x-filename', 'video.mp4')).replace('\\', '/').split('/')[-1][:200]
+    extension = Path(filename).suffix.lower()
+    if extension not in EXTENSIONS:
+        raise HTTPException(415, 'Choose an MP4, AVI, MOV, MKV, WEBM or M4V video')
+    maximum = runtime.settings.max_upload_mb * 1024 * 1024
+    try:
+        declared = int(request.headers.get('content-length', '0'))
+    except ValueError:
+        raise HTTPException(400, 'Invalid upload length') from None
+    if declared > maximum:
+        raise HTTPException(413, f'Video exceeds the {runtime.settings.max_upload_mb} MB upload limit')
+    stored_name = uuid4().hex + extension
+    path = runtime.videos.path(stored_name)
+    total, installed = 0, False
+    try:
+        with path.open('xb') as file:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > maximum:
+                    raise HTTPException(413, f'Video exceeds the {runtime.settings.max_upload_mb} MB upload limit')
+                await asyncio.to_thread(file.write, chunk)
+        if total == 0:
+            raise HTTPException(400, 'The uploaded file is empty')
+        try:
+            metadata = await asyncio.to_thread(runtime.videos.validate, path)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        info = {'filename': filename, 'stored_name': stored_name, 'size_bytes': total, **metadata, 'active': True}
+        try:
+            await asyncio.to_thread(runtime.activate_video, camera_id, info)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from None
+        installed = True
+        return {'camera_id': camera_id, 'video': {k: v for k, v in info.items() if k != 'stored_name'},
+                'message': 'Video ready. Press Play to start this camera slot.'}
+    finally:
+        if not installed:
+            path.unlink(missing_ok=True)
+
+
+class Playback(BaseModel):
+    action: Literal['play', 'pause', 'restart', 'restore-camera']
+
+
+@router.post('/cameras/{camera_id}/playback')
+def playback(camera_id: str, body: Playback, request: Request):
+    worker(request, camera_id)
+    try:
+        request.app.state.runtime.control_video(camera_id, body.action)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return {'camera_id': camera_id, 'status': worker(request, camera_id).status()}
+
+
+@router.post('/videos/play-all')
+def play_all(request: Request):
+    runtime = request.app.state.runtime
+    results = []
+    for camera_id, item in list(runtime.manager.workers.items()):
+        if item.config.source_type == 'file':
+            try:
+                runtime.control_video(camera_id, 'play')
+                results.append({'camera_id': camera_id, 'success': True})
+            except (ValueError, RuntimeError):
+                results.append({'camera_id': camera_id, 'success': False})
+    return {'results': results}
+
+
+@router.post('/processing/start')
+def start_processing(request: Request):
+    runtime = request.app.state.runtime
+    try:
+        request.app.state.database.check()
+        runtime.repository.sync_cameras(runtime.cameras)
+    except Exception:
+        raise HTTPException(503, 'Configure and initialize MySQL before enabling event processing. Video playback is available.') from None
+    runtime.start_processing()
+    request.app.state.startup_error = None
+    return {'models': runtime.model_status}

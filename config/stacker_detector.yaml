@@ -1,9 +1,0 @@
-# YOLOv8 dataset config for reach-stacker detection
-path: ./data/stacker_dataset
-train: images/train
-val: images/val
-
-names:
-  0: spreader        # The spreader/twist-lock head
-  1: container       # Shipping container (any size)
-  2: ground_plane    # Ground reference for tier calibration

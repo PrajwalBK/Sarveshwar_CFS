@@ -1,41 +1,128 @@
+# =====================================================================
+# GitIgnore for GateVision / AI Video Based Inventory
+# =====================================================================
+
+# --- Python & Bytecode ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
-venv/
-ENV/
-.venv/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Environment & Sensitive Credentials ---
 .env
-*.log
+!.env.example
+*.pem
+*.key
+
+# --- Large Model Files & Weights ---
+# Do NOT push bulky OLM OCR / Qwen-VL / EasyOCR / Vision-Language models
+models/olm*
+models/qwen*
+models/easyocr/
+**/models/easyocr/**
+**/easyocr/**
+models/transformers/
+*olmocr*
+*Qwen*
+*qwen2*
+huggingface/
+.cache/
+**/huggingface/**
+**/.cache/**
+*.pth
+*.pt.bak
+# TensorRT & Large ONNX engines
+*.engine
+*.plan
+*.onnx
+# Large training runs
+runs/
 out/
-data/
+
+# --- Video Files & Heavy Media (>100MB GitHub limit) ---
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.m4v
+*.flv
+*.wmv
 recordings/
 Test_Data/
-ReachStacker*
-Cointainer*
-Container*
+data/
+
+# --- Runtime Uploads, Snapshots & Event Evidence ---
+uploads/*.mp4
+uploads/*.avi
+uploads/*.mov
+uploads/*.mkv
+uploads/*.webm
+uploads/*.m4v
+snapshots/
+backend/snapshots/
+backend/uploads/*.mp4
+backend/uploads/*.avi
+backend/uploads/*.mov
+backend/uploads/*.mkv
+backend/uploads/*.webm
+
+# --- Scratch, Test Crops & Temporary Images ---
+scratch/
+feet_*.png
+feet_*.jpg
+feet_crop_*.jpg
+horiz_*.jpg
+track6_*.jpg
+crop_test.jpg
+thresh.jpg
+word_*.jpg
+*.tmp
+
+# --- Frontend Node & Build Artifacts ---
+node_modules/
+.angular/
+frontend/dist/
+frontend/.angular/
+frontend/node_modules/
+
+# --- Databases & Logs ---
+*.db
+*.sqlite
+*.sqlite3
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- IDEs & OS Files ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Archives ---
 *.zip
 *.tar
 *.tar.gz
 *.7z
 *.rar
-*.weights
-*.mp4
-*.mov
-*.avi
-*.mkv
-config/calib/*.json
-.DS_Store
-.vscode/
-.idea/
-scratch/
-*.db
-*.sqlite
-
-# Exclude files exceeding GitHub 100MB limit
-models/yolov8m.onnx
+ReachStacker*

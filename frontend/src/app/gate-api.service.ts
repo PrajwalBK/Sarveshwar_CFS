@@ -1,0 +1,58 @@
+import { inject, Injectable } from '@angular/core';
+import { HttpClient, HttpErrorResponse, HttpHeaders, HttpParams, HttpRequest } from '@angular/common/http';
+import { catchError, of, throwError } from 'rxjs';
+
+export interface Camera {
+  id: string; name: string; gate_id: string; direction: string; source_type: string; source_env: string;
+  status: 'ONLINE' | 'OFFLINE' | 'RECONNECTING' | 'ERROR'; reason: string;
+  capture_fps: number; dropped_frames: number; reconnect_count: number; last_frame_at: string | null;
+  has_frame: boolean;
+  playback_status: 'READY' | 'PLAYING' | 'PAUSED' | 'COMPLETED' | 'STOPPED' | null;
+  video_position_seconds: number; video_duration_seconds: number | null;
+  video: {filename: string; size_bytes: number; duration_seconds: number | null; active: boolean} | null;
+  active_source_id: string | null; active_source_name: string | null;
+}
+export interface CameraSource { id: string; name: string; configured: boolean; }
+export interface GateEvent { id: string; gate_id: string; timestamp: string; container_number: string | null; event_type: string; status: string; }
+export interface Detection { id?: string; camera_id: string; class_name: string; confidence: number; bbox: number[]; timestamp?: string; frame_timestamp?: string; track_id?: number; }
+export interface OCR { id: string; raw_text: string; normalized_text: string; confidence: number; validation_status: string; }
+export interface Snapshot { id: string; camera_id: string; timestamp: string; }
+export interface EventDetail extends GateEvent { detections: Detection[]; ocr_results: OCR[]; snapshots: Snapshot[]; }
+export interface EventPage { items: GateEvent[]; total: number; offset: number; limit: number; }
+export interface Health { status: string; database: string; pipeline_enabled: boolean; online_cameras: number; enabled_cameras: number; models: {detector: string; ocr: string; error_type?: string | null}; processing_error: string | null; startup_error: string | null; max_upload_mb: number; }
+export interface Metrics { cpu_percent: number; memory_percent: number; gpu_utilization_percent: number | null; ocr_queue_depth: number; latencies: Record<string, {p50_ms: number; p95_ms: number}>; inference_fps: Record<string, number>;
+  gpu_name: string | null; gpu_power_watts: number | null; gpu_power_limit_watts: number | null; gpu_temperature_c: number | null;
+  gpu_memory_used_mb: number | null; gpu_memory_total_mb: number | null; gpu_source: string; uptime_seconds: number;
+}
+export interface UploadState { busy: boolean; progress: number; message: string; error: boolean; }
+export type PlaybackAction = 'play' | 'pause' | 'restart' | 'restore-camera';
+
+@Injectable({providedIn: 'root'})
+export class GateApi {
+  private http = inject(HttpClient);
+  cameras() { return this.http.get<Camera[]>('/api/cameras'); }
+  cameraSources() { return this.http.get<CameraSource[]>('/api/cameras/sources/available'); }
+  selectCamera(id: string, sourceId: string) { return this.http.post(`/api/cameras/${encodeURIComponent(id)}/source`, {source_id: sourceId}); }
+  health() { return this.http.get<Health>('/api/health').pipe(catchError((error: HttpErrorResponse) =>
+    error.status === 503 && error.error?.database ? of(error.error as Health) : throwError(() => error))); }
+  metrics() { return this.http.get<Metrics>('/api/metrics'); }
+  events(offset: number, container: string, type: string) {
+    let params = new HttpParams().set('limit', 25).set('offset', offset);
+    if (container.trim()) params = params.set('container', container.trim().toUpperCase());
+    if (type) params = params.set('event_type', type);
+    return this.http.get<EventPage>('/api/gate-events', {params});
+  }
+  event(id: string) { return this.http.get<EventDetail>(`/api/gate-events/${encodeURIComponent(id)}`); }
+  eventJsonUrl(id: string) { return `/api/gate-events/${encodeURIComponent(id)}/json`; }
+  eventJson(id: string) { return this.http.get<Record<string, unknown>>(`/api/gate-events/${encodeURIComponent(id)}/json`); }
+
+  uploadVideo(id: string, file: File) {
+    return this.http.request(new HttpRequest('POST', `/api/cameras/${encodeURIComponent(id)}/video`, file, {
+      reportProgress: true,
+      headers: new HttpHeaders({'Content-Type': 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name)})
+    }));
+  }
+  playback(id: string, action: PlaybackAction) { return this.http.post(`/api/cameras/${encodeURIComponent(id)}/playback`, {action}); }
+  playAll() { return this.http.post<{results: {camera_id: string; success: boolean}[]}>('/api/videos/play-all', {}); }
+  startProcessing() { return this.http.post('/api/processing/start', {}); }
+}

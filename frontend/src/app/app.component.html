@@ -1,0 +1,187 @@
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">G</span>
+    <div><strong>GateVision</strong><small>CONTAINER OPERATIONS</small></div>
+  </div>
+  <nav aria-label="Primary" class="primary-nav">
+    <button type="button" class="nav-tab" [class.active]="activeTab() === 'overview'" (click)="setTab('overview')">
+      Gate overview
+    </button>
+    <button type="button" class="nav-tab" [class.active]="activeTab() === 'events'" (click)="setTab('events')">
+      Recent gate events
+      @if (page().total) {
+        <span class="tab-badge">{{ page().total }}</span>
+      }
+    </button>
+    @if (detail(); as d) {
+      <button type="button" class="nav-tab tab-detail" [class.active]="activeTab() === 'detail'" (click)="setTab('detail')">
+        View event: {{ d.container_number || d.id.slice(0, 8) }}
+      </button>
+    }
+  </nav>
+  <div class="header-context">
+    <div><small>SITE</small><span>Panvel CFS</span></div>
+    <div class="admin-context">
+      <span class="avatar">N</span>
+      <span>nam11<small>Prosper Cloud Connected</small></span>
+    </div>
+  </div>
+</header>
+
+<main>
+  @if (error()) {
+    <div class="alert bad" role="alert">{{ error() }}</div>
+  }
+  @if (notice()) {
+    <div class="alert" role="status">
+      <span>{{ notice() }}</span>
+      <button (click)="notice.set('')">Dismiss</button>
+    </div>
+  }
+
+  <!-- PAGE TAB 1: GATE OVERVIEW -->
+  @if (activeTab() === 'overview') {
+    <div class="page-view animate-fade">
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">OPERATIONS <span>/</span> GATE MODULE</div>
+          <h1>Gate overview</h1>
+          <p>Four views. One gate workflow. Add recorded footage to test without cameras.</p>
+        </div>
+        <div class="connection">
+          <span class="badge" [class.good]="!error() && health()?.status === 'READY'" [class.warn]="!!error() || health()?.status === 'DEGRADED'">
+            {{ error() ? 'DISCONNECTED' : health()?.status || 'CONNECTING' }}
+          </span>
+          <small>{{ lastUpdated() ? ('Updated ' + (lastUpdated() | date:'HH:mm:ss')) : 'Waiting for backend' }}</small>
+        </div>
+      </div>
+
+      <div class="workspace-layout">
+        <div class="gate-workspace">
+          <section class="input-summary">
+            <div>
+              <span class="mode-dot"></span>
+              <strong>Manual video testing</strong>
+              <small>{{ videoCount() }} of 4 slots have videos · {{ playingCount() }} playing</small>
+            </div>
+            <button class="primary" (click)="playAll()" [disabled]="videoCount() === 0 || !!error()">
+              ▶ Play all videos
+            </button>
+          </section>
+
+          <div class="section-heading">
+            <div>
+              <h2>Camera inputs</h2>
+              <p>MP4, AVI, MOV, MKV, WEBM · up to {{ health()?.max_upload_mb ?? 2048 }} MB per file</p>
+            </div>
+            <span class="subtle">4 INDEPENDENT VIEWS</span>
+          </div>
+
+          @if (loading()) {
+            <p class="empty">Connecting to the Gate backend…</p>
+          }
+
+          <gate-camera-grid
+            [cameras]="cameras()"
+            [cameraSources]="cameraSources()"
+            [inferenceFps]="metrics()?.inference_fps ?? {}"
+            [refreshToken]="refreshToken()"
+            [stale]="!!error()"
+            [uploads]="uploads()"
+            [busy]="controlsBusy()"
+            (upload)="uploadVideo($event)"
+            (control)="playback($event)"
+            (sourceChange)="selectCamera($event)"
+          />
+
+          <div class="processing-strip">
+            <div>
+              <strong>AI event processing</strong>
+              <small>{{ health()?.pipeline_enabled ? 'Detection and OCR use the configured models.' : 'Video playback is available. Enable AI when models and MySQL are configured.' }}</small>
+              @if (health()?.models?.error_type) {
+                <small class="error-text">Model loading failed: {{ health()?.models?.error_type }}. Check model configuration.</small>
+              }
+            </div>
+            <button
+              (click)="startProcessing()"
+              [disabled]="!!error() || health()?.models?.detector === 'LOADING' || (health()?.models?.detector === 'READY' && health()?.models?.ocr === 'READY')">
+              {{ health()?.models?.detector === 'LOADING' ? 'Loading…' : health()?.pipeline_enabled ? 'Check / retry AI' : 'Enable AI' }}
+            </button>
+          </div>
+        </div>
+
+        <gate-system-health [health]="health()" [metrics]="metrics()" [stale]="!!error()" />
+      </div>
+    </div>
+  }
+
+  <!-- PAGE TAB 2: RECENT GATE EVENTS -->
+  @if (activeTab() === 'events') {
+    <div class="page-view animate-fade">
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">EVENT LOG <span>/</span> GATE MODULE</div>
+          <h1>Recent gate events</h1>
+          <p>Complete historical log of container detections, ISO validations, evidence snapshots and event JSON files.</p>
+        </div>
+        <span class="count-pill large-pill">{{ page().total }} total events</span>
+      </div>
+
+      <section class="panel events-full-panel" aria-labelledby="events-heading">
+        @if (eventsError()) {
+          <div class="alert warn" role="status">{{ eventsError() }}</div>
+        }
+
+        <form class="filters" (ngSubmit)="filter()">
+          <label>
+            Container number
+            <input name="container" [(ngModel)]="containerFilter" maxlength="11" placeholder="Search container (e.g. GXYU5090704)">
+          </label>
+          <label>
+            Movement
+            <select name="movement" [(ngModel)]="typeFilter">
+              <option value="">All movements</option>
+              <option>ENTRY</option>
+              <option>EXIT</option>
+              <option>UNKNOWN</option>
+            </select>
+          </label>
+          <button type="submit" class="primary">Apply filters</button>
+          @if (containerFilter || typeFilter) {
+            <button type="button" (click)="containerFilter = ''; typeFilter = ''; filter()">Clear</button>
+          }
+        </form>
+
+        <gate-event-table [events]="page().items" (selected)="select($event)" />
+
+        <div class="pagination">
+          <small>Showing {{ page().items.length ? page().offset + 1 : 0 }}–{{ page().offset + page().items.length }} of {{ page().total }}</small>
+          <div>
+            <button [disabled]="page().offset === 0" (click)="movePage(-25)">Previous</button>
+            <button [disabled]="page().offset + 25 >= page().total" (click)="movePage(25)">Next</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  }
+
+  <!-- PAGE TAB 3: VIEW EVENT DETAILS -->
+  @if (activeTab() === 'detail') {
+    <div class="page-view animate-fade">
+      @if (detail()) {
+        <gate-event-detail [event]="detail()" (back)="backToEvents()" />
+      } @else {
+        <div class="panel empty-state">
+          <h2>No event selected</h2>
+          <p>Please choose an event from the Recent gate events tab to view complete evidence.</p>
+          <button class="primary" (click)="setTab('events')">Go to Recent gate events</button>
+        </div>
+      }
+    </div>
+  }
+
+  <footer>
+    <span>GateVision · Industrial Gate Module POC</span>
+    <span>Site: Panvel CFS · Prosper API Cloud Sync Active · Local time: UTC+05:30</span>
+  </footer>
+</main>

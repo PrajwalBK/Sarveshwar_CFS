@@ -1,0 +1,19 @@
+# Set VIDEO_1_PATH etc. in backend/.env to local recorded files.
+# File playback is paced at the source FPS and reports OFFLINE/file_completed at EOF.
+cameras:
+  - id: replay-1
+    name: Gate replay front
+    gate_id: replay-lane
+    source_env: VIDEO_1_PATH
+    source_type: file
+    direction: UNKNOWN
+    capture_fps: 15
+    inference_fps: 3
+    loop_file: false
+  - id: replay-2
+    name: Gate replay rear
+    gate_id: replay-lane
+    source_env: VIDEO_2_PATH
+    source_type: file
+    direction: UNKNOWN
+    enabled: false
