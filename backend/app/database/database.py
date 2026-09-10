@@ -1,6 +1,8 @@
 from sqlalchemy import create_engine, event, inspect, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.engine import make_url
+from pathlib import Path
 from app.database.models import Base, SchemaVersion
 
 SCHEMA_VERSION = 1
@@ -8,19 +10,32 @@ SCHEMA_VERSION = 1
 
 class Database:
     def __init__(self, url: str):
+        parsed = make_url(url)
+        self.is_sqlite = parsed.get_backend_name() == 'sqlite'
         options = {'pool_pre_ping': True}
-        if url.startswith('sqlite'):
-            options['connect_args'] = {'check_same_thread': False}
-            if ':memory:' in url:
+        if self.is_sqlite:
+            if parsed.database and parsed.database != ':memory:':
+                # Resolve relative paths against backend, regardless of caller cwd.
+                location = Path(parsed.database)
+                if not location.is_absolute():
+                    location = Path(__file__).resolve().parents[2] / location
+                location = location.resolve()
+                location.parent.mkdir(parents=True, exist_ok=True)
+                url = parsed.set(database=str(location))
+            options['connect_args'] = {'check_same_thread': False, 'timeout': 10}
+            if not parsed.database or parsed.database == ':memory:':
                 options['poolclass'] = StaticPool
         else:
             options['connect_args'] = {'connect_timeout': 3, 'read_timeout': 5, 'write_timeout': 5}
             options['pool_recycle'] = 1800
         self.engine = create_engine(url, **options)
-        if url.startswith('sqlite'):
+        if self.is_sqlite:
             @event.listens_for(self.engine, 'connect')
             def enable_foreign_keys(connection, _):
                 connection.execute('PRAGMA foreign_keys=ON')
+                connection.execute('PRAGMA busy_timeout=10000')
+                connection.execute('PRAGMA journal_mode=WAL')
+                connection.execute('PRAGMA synchronous=FULL')
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def initialize(self):

@@ -103,6 +103,9 @@ frontend/node_modules/
 
 # --- Databases & Logs ---
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 *.sqlite
 *.sqlite3
 *.log

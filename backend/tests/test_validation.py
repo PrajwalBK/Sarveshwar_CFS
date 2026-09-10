@@ -34,3 +34,27 @@ def test_ambiguous_ids_and_checksum_algorithm():
     assert normalize(' abcu-123456-7 ') == 'ABCU1234567'
     with pytest.raises(ValueError):
         check_digit('INVALID')
+
+
+def test_feet_size_code_c_to_g_correction():
+    from app.ocr.validator import correct_feet_size_codes, parse_feet_size
+    assert correct_feet_size_codes('45C1') == '45G1'
+    assert correct_feet_size_codes('22C1') == '22G1'
+    assert correct_feet_size_codes('42C1') == '42G1'
+    assert correct_feet_size_codes('L5C1') == 'L5G1'
+    assert correct_feet_size_codes('45C') == '45G1'
+    assert correct_feet_size_codes('42 C 1') == '42G1'
+
+    assert parse_feet_size('45C1') == '40 FT HC'
+    assert parse_feet_size('45G1') == '40 FT HC'
+    assert parse_feet_size('42G1') == '40 FT'
+    assert parse_feet_size('22G1') == '20 FT'
+    assert parse_feet_size('L5G1') == '45 FT HC'
+    assert parse_feet_size('40 FT') == '40 FT'
+    assert parse_feet_size('20FEET') == '20 FT'
+
+    # Validator normalizes 45C1 directly to 45G1
+    val = ContainerValidator().validate(OCRRead('45C1', .95))
+    assert val.normalized_text == '45G1'
+    assert val.validation_status == 'VALID_SIZE_CODE'
+

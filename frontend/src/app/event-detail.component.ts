@@ -39,6 +39,9 @@ import { EventDetail } from './gate-api.service';
                 {{ item.status.replaceAll('_', ' ') }}
               </span>
               <span class="movement-pill">{{ item.event_type }}</span>
+              @if (item.container_size) {
+                <span class="size-pill feet">📏 {{ item.container_size }}{{ item.size_code ? ' (' + item.size_code + ')' : '' }}</span>
+              }
               @if (hasFeetDetection(item)) {
                 <span class="feet-pill">🦶 FEET DETECTED</span>
               }
@@ -83,10 +86,12 @@ import { EventDetail } from './gate-api.service';
               @if (item.ocr_results.length) {
                 <div class="ocr-cards-list">
                   @for (ocr of item.ocr_results; track ocr.id) {
-                    <div class="ocr-card" [class.ocr-valid]="ocr.validation_status === 'VALID'">
+                    <div class="ocr-card" [class.ocr-valid]="ocr.validation_status === 'VALID' || ocr.validation_status === 'VALID_SIZE_CODE'">
                       <div class="ocr-card-header">
                         <span class="mono ocr-text">{{ ocr.normalized_text || 'No text' }}</span>
-                        <span class="ocr-badge" [class.good]="ocr.validation_status === 'VALID'">{{ ocr.validation_status }}</span>
+                        <span class="ocr-badge" [class.good]="ocr.validation_status === 'VALID' || ocr.validation_status === 'VALID_SIZE_CODE'">
+                          {{ ocr.validation_status === 'VALID_SIZE_CODE' ? 'VALID SIZE CODE' : ocr.validation_status }}
+                        </span>
                       </div>
                       <div class="ocr-card-details">
                         <div class="detail-row">

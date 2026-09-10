@@ -37,6 +37,8 @@ def create_app(settings=None, database=None, camera_configs=None, runtime_factor
         app.state.snapshots, app.state.runtime = snapshots, runtime
         app.state.startup_error = None
         try:
+            if db.is_sqlite and settings.deployment_mode != 'test':
+                await asyncio.to_thread(db.initialize)
             await asyncio.to_thread(db.check)
             await asyncio.to_thread(repository.sync_cameras, configs)
             log.info('application_started')

@@ -19,7 +19,6 @@ class OpenCVStream:
             self.cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG, [
                 cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, settings.open_timeout_ms,
                 cv2.CAP_PROP_READ_TIMEOUT_MSEC, settings.read_timeout_ms,
-                cv2.CAP_PROP_BUFFERSIZE, 1,
             ])
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         else:

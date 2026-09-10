@@ -22,6 +22,7 @@ export class AppComponent {
   activeTab = signal<'overview' | 'events' | 'detail'>('overview');
   cameras = signal<Camera[]>([]);
   cameraSources = signal<CameraSource[]>([]);
+  discovery = signal({state: 'WAITING', found: 0, message: 'Waiting for camera discovery'});
   page = signal<EventPage>({items: [], total: 0, limit: 25, offset: 0});
   health = signal<Health | null>(null);
   metrics = signal<Metrics | null>(null);
@@ -46,13 +47,14 @@ export class AppComponent {
 
     // SQL failures must not hide camera slots, upload controls or machine health.
     merge(timer(0, 2500), this.refresh).pipe(
-      exhaustMap(() => forkJoin({cameras: this.api.cameras(), sources: this.api.cameraSources(), health: this.api.health(), metrics: this.api.metrics(),
+      exhaustMap(() => forkJoin({cameras: this.api.cameras(), sources: this.api.cameraSources(), discovery: this.api.discoveryStatus(), health: this.api.health(), metrics: this.api.metrics(),
         events: this.api.events(this.offset, this.containerFilter, this.typeFilter).pipe(catchError(() => of(null)))}).pipe(timeout(15000), catchError(() => of(null)))),
       takeUntilDestroyed(this.destroy)
     ).subscribe(data => {
       this.loading.set(false);
       if (!data) { this.error.set('Backend disconnected. Start the Gate service to upload and play videos.'); return; }
       this.error.set(''); this.cameras.set(data.cameras); this.cameraSources.set(data.sources); this.health.set(data.health); this.metrics.set(data.metrics);
+      this.discovery.set(data.discovery);
       if (data.events) { this.page.set(data.events); this.eventsError.set(''); }
       else this.eventsError.set('Event storage is unavailable. You can still upload and preview videos.');
       this.lastUpdated.set(new Date());
@@ -145,6 +147,20 @@ export class AppComponent {
     this.api.playAll().pipe(takeUntilDestroyed(this.destroy)).subscribe({next: value => {
       this.notice.set(`Started ${value.results.filter(r => r.success).length} video inputs.`); this.refresh.next();
     }, error: () => this.notice.set('Could not start the video inputs.')});
+  }
+  rescan() {
+    this.api.rescan().pipe(takeUntilDestroyed(this.destroy)).subscribe({
+      next: () => { this.notice.set('Camera search requested.'); this.refresh.next(); },
+      error: () => this.notice.set('Could not request camera search.')
+    });
+  }
+  setCameraRole({id, role, direction}: {id: string; role: string; direction: string}) {
+    if (this.controlsBusy()[id]) return;
+    this.controlsBusy.update(v => ({...v, [id]: true}));
+    this.api.cameraRole(id, role, direction).pipe(takeUntilDestroyed(this.destroy)).subscribe({
+      next: () => { this.controlsBusy.update(v => ({...v, [id]: false})); this.refresh.next(); },
+      error: (e: HttpErrorResponse) => { this.controlsBusy.update(v => ({...v, [id]: false})); this.notice.set(this.errorMessage(e, 'Could not save camera role.')); }
+    });
   }
   startProcessing() {
     this.api.startProcessing().pipe(takeUntilDestroyed(this.destroy)).subscribe({next: () => {

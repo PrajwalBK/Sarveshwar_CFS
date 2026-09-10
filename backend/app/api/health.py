@@ -14,7 +14,8 @@ def health(request: Request):
         database = 'UNAVAILABLE'
     cameras = runtime.camera_status()
     enabled = [c for c in cameras if c['enabled']]
-    ready = database == 'READY' and not request.app.state.startup_error and not runtime.last_processing_error
+    spool = runtime.ocr_store.status()
+    ready = database == 'READY' and not request.app.state.startup_error and not runtime.last_processing_error and not runtime.ocr_spool_error and not spool['failed']
     if runtime.settings.pipeline_enabled:
         ready = ready and runtime.model_status['detector'] == 'READY' and runtime.model_status['ocr'] == 'READY'
         ready = ready and bool(enabled) and all(c['status'] == 'ONLINE' or c['playback_status'] in ('READY', 'COMPLETED', 'PAUSED') for c in enabled)
@@ -25,6 +26,7 @@ def health(request: Request):
                          'online_cameras': sum(c['status'] == 'ONLINE' for c in enabled),
                          'enabled_cameras': len(enabled), 'models': runtime.model_status,
                          'processing_error': runtime.last_processing_error,
+                         'ocr_spool': spool, 'ocr_spool_error': runtime.ocr_spool_error,
                          'startup_error': request.app.state.startup_error}, status_code=200 if ready else 503)
 
 
@@ -40,4 +42,5 @@ def models(request: Request):
 def metrics(request: Request):
     runtime = request.app.state.runtime
     return {**runtime.metrics.snapshot(), 'cameras': [w.status() for w in runtime.manager.workers.values()],
-            'ocr_queue_depth': runtime.queue.qsize()}
+            'ocr_queue_depth': runtime.ocr_store.status()['pending'],
+            'ocr_save_queue_depth': runtime.queue.qsize(), 'ocr_spool': runtime.ocr_store.status()}

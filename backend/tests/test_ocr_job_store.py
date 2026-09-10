@@ -1,0 +1,200 @@
+from dataclasses import replace
+from unittest.mock import Mock
+import numpy as np
+import pytest
+from app.ocr.job_store import OCRJobStore
+from app.ocr.validator import ContainerValidator
+from app.domain import OCRRead
+from app.runtime import GateRuntime
+
+
+def test_atomic_images_and_metadata_survive_reopen(tmp_path, make_job):
+    job = replace(make_job(), role='LEFT')
+    crop = np.full((30, 40, 3), 123, dtype=np.uint8)
+    store = OCRJobStore(tmp_path)
+    key = store.save(job, crop)
+    assert store.save(job, crop) == key
+    reopened = OCRJobStore(tmp_path)
+    restored, pixels, validation = reopened.load(reopened.next_id())
+    assert restored.origin_key == job.origin_key
+    assert restored.role == 'LEFT' and restored.frame.timestamp == job.frame.timestamp
+    assert np.array_equal(pixels, crop)
+    assert np.array_equal(restored.frame.image, job.frame.image)
+    assert validation is None
+    with store.connection() as db:
+        row = db.execute('SELECT crop,image,typeof(crop) kind FROM jobs WHERE id=?', (key,)).fetchone()
+    assert row['kind'] == 'text'
+    assert store.image_path(row['crop']).is_file()
+    assert store.image_path(row['image']).is_file()
+    with pytest.raises(Exception):
+        store.save(replace(job, frame=replace(job.frame, sequence=2)), np.empty((0, 0, 3), dtype=np.uint8))
+    assert store.status()['total'] == 1
+
+
+def test_capacity_failure_never_marks_job_saved(tmp_path, make_job):
+    store = OCRJobStore(tmp_path)
+    store.max_bytes = 1
+    with pytest.raises(OSError):
+        store.save(make_job(), np.zeros((10, 10, 3), dtype=np.uint8))
+    assert store.next_id() is None
+
+
+def test_votes_and_validation_recover_and_complete_idempotently(settings, repository, snapshots, camera, make_job):
+    first = make_job(sequence=1)
+    second = make_job(sequence=2)
+    crop = np.zeros((30, 40, 3), dtype=np.uint8)
+    runtime = GateRuntime(settings, [camera], repository, snapshots)
+    runtime.ocr = Mock()
+    runtime.ocr.read.return_value = OCRRead('CSQU3054383', .99)
+    key1 = runtime.ocr_store.save(first, crop)
+    key2 = runtime.ocr_store.save(second, crop)
+    runtime._process_saved_ocr(key1)
+    assert runtime.ocr_store.status()['pending'] == 1
+
+    # Simulate crash after OCR result was saved but before event commit.
+    validation = ContainerValidator().validate(OCRRead('CSQU3054383', .99))
+    runtime.ocr_store.save_validation(key2, validation)
+    recovered = GateRuntime(settings, [camera], repository, snapshots)
+    recovered.ocr = Mock()
+    recovered._process_saved_ocr(key2)
+    recovered.ocr.read.assert_not_called()
+    assert recovered.ocr_store.status()['pending'] == 0
+    evidence = recovered.ocr_store.evidence(first.origin_key, 4)
+    assert evidence.event_id is not None
+    assert len(evidence.reads) == 2
+    recovered._process_saved_ocr(key2)
+    assert recovered.ocr_store.evidence(first.origin_key, 4).event_id == evidence.event_id
+
+
+def test_failed_ocr_preserves_evidence_for_retry(settings, repository, snapshots, camera, make_job):
+    runtime = GateRuntime(settings, [camera], repository, snapshots)
+    runtime.ocr = Mock()
+    runtime.ocr.read.side_effect = RuntimeError('OCR unavailable')
+    key = runtime.ocr_store.save(make_job(), np.zeros((20, 20, 3), dtype=np.uint8))
+    with pytest.raises(RuntimeError):
+        runtime._process_saved_ocr(key)
+    assert OCRJobStore(runtime.ocr_store.root).next_id() == key
+    runtime.ocr_store.retry(key, 'RuntimeError')
+    assert runtime.ocr_store.status() == {'total': 1, 'pending': 1, 'failed': 1}
+
+
+def test_event_commit_before_spool_completion_is_safe(settings, repository, snapshots, camera, make_job, monkeypatch):
+    settings.ocr_confirmations = 1
+    runtime = GateRuntime(settings, [camera], repository, snapshots)
+    runtime.ocr = Mock()
+    runtime.ocr.read.return_value = OCRRead('CSQU3054383', .99)
+    key = runtime.ocr_store.save(make_job(), np.zeros((20, 20, 3), dtype=np.uint8))
+    monkeypatch.setattr(runtime.ocr_store, 'complete', Mock(side_effect=OSError('Simulated crash')))
+    with pytest.raises(OSError):
+        runtime._process_saved_ocr(key)
+    from sqlalchemy import select, func
+    from app.database.models import GateEvent
+    with repository.db.sessions() as session:
+        assert session.scalar(select(func.count()).select_from(GateEvent)) == 1
+    recovered = GateRuntime(settings, [camera], repository, snapshots)
+    recovered.ocr = Mock()
+    recovered._process_saved_ocr(key)
+    recovered.ocr.read.assert_not_called()
+    with repository.db.sessions() as session:
+        assert session.scalar(select(func.count()).select_from(GateEvent)) == 1
+
+
+def test_failed_disk_write_retries_without_running_ocr(settings, repository, snapshots, camera, make_job, monkeypatch):
+    import threading
+    import time
+    runtime = GateRuntime(settings, [camera], repository, snapshots)
+    runtime.ocr = Mock()
+    save = runtime.ocr_store.save
+    attempts = []
+    def transient(job, crop):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise OSError('Disk temporarily unavailable')
+        return save(job, crop)
+    monkeypatch.setattr(runtime.ocr_store, 'save', transient)
+    runtime.queue.put(make_job())
+    thread = threading.Thread(target=runtime._save_ocr_loop)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 4
+        while runtime.ocr_store.next_id() is None and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert runtime.ocr_store.next_id() is not None
+        assert len(attempts) >= 2
+        runtime.ocr.read.assert_not_called()
+    finally:
+        runtime._stop.set()
+        thread.join(2)
+
+
+def legacy_store(root, job):
+    """Recreate the previous BLOB schema from a real saved job."""
+    import cv2
+    store = OCRJobStore(root)
+    key = store.save(job, np.zeros((20, 20, 3), dtype=np.uint8))
+    with store.connection() as db:
+        row = dict(db.execute('SELECT * FROM jobs WHERE id=?', (key,)).fetchone())
+        db.execute('DROP TABLE jobs')
+        db.execute('''CREATE TABLE jobs (
+            id INTEGER PRIMARY KEY, origin TEXT NOT NULL, sequence INTEGER NOT NULL,
+            metadata TEXT NOT NULL, crop BLOB NOT NULL, image BLOB NOT NULL,
+            state TEXT NOT NULL DEFAULT 'PENDING', validation TEXT, event_id TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
+            error_type TEXT, UNIQUE(origin,sequence))''')
+        db.execute('INSERT INTO jobs(id,origin,sequence,metadata,crop,image,attempts) VALUES(?,?,?,?,?,?,?)',
+                   (key, row['origin'], row['sequence'], row['metadata'],
+                    cv2.imencode('.png', np.zeros((20,20,3), dtype=np.uint8))[1].tobytes(),
+                    cv2.imencode('.png', job.frame.image)[1].tobytes(), 2))
+    return key
+
+
+def test_migrate_existing_blobs_without_losing_pending_job(tmp_path, make_job):
+    key = legacy_store(tmp_path / 'spool', make_job())
+    store = OCRJobStore(tmp_path / 'spool', image_root=tmp_path / 'snapshots' / 'ocr-pending')
+    assert store.next_id() == key
+    job, crop, validation = store.load(key)
+    assert np.array_equal(job.frame.image, make_job().frame.image)
+    assert crop.shape == (20,20,3)
+    with store.connection() as db:
+        row = db.execute('SELECT crop, image, attempts, typeof(crop) kind FROM jobs').fetchone()
+        assert row['kind'] == 'text' and row['attempts'] == 2
+        assert all(r['type'] != 'BLOB' for r in db.execute('PRAGMA table_info(jobs)'))
+    assert store.image_path(row['crop']).is_file()
+
+
+def test_interrupted_migration_preserves_original_and_retries(tmp_path, make_job, monkeypatch):
+    import sqlite3
+    root = tmp_path / 'spool'
+    key = legacy_store(root, make_job())
+    original = OCRJobStore._write_image
+    def fail_frame(self, relative, data):
+        if relative.endswith('frame.png'):
+            raise OSError('Disk full')
+        original(self, relative, data)
+    with monkeypatch.context() as patch:
+        patch.setattr(OCRJobStore, '_write_image', fail_frame)
+        with pytest.raises(OSError):
+            OCRJobStore(root, image_root=tmp_path / 'snapshots')
+    with sqlite3.connect(root / 'jobs.sqlite3') as db:
+        assert db.execute('SELECT typeof(crop) FROM jobs').fetchone()[0] == 'blob'
+    store = OCRJobStore(root, image_root=tmp_path / 'snapshots')
+    assert store.next_id() == key
+    assert store.load(key)[1].shape == (20,20,3)
+
+
+def test_partial_image_write_never_exposes_job(tmp_path, make_job, monkeypatch):
+    store = OCRJobStore(tmp_path)
+    original = store._write_image
+    def fail_frame(relative, data):
+        if relative.endswith('frame.png'):
+            raise OSError('Disk full')
+        original(relative, data)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, '_write_image', fail_frame)
+        with pytest.raises(OSError):
+            store.save(make_job(), np.zeros((20,20,3), dtype=np.uint8))
+    assert store.next_id() is None
+    key = store.save(make_job(), np.zeros((20,20,3), dtype=np.uint8))
+    assert store.next_id() == key
+    with pytest.raises(ValueError):
+        store.image_path('../outside.png')

@@ -50,7 +50,7 @@ def test_database_outage_returns_sanitized_503(settings, repository, camera, mon
         assert client.get('/api/gate-events').json() == {'detail': 'Database unavailable'}
 
 
-def test_config_rejects_non_mysql_outside_tests_and_invalid_geometry(camera):
+def test_config_requires_persistent_sqlite_outside_tests_and_valid_geometry(camera):
     with pytest.raises(ValueError):
         Settings(_env_file=None, deployment_mode='development', database_url='sqlite://')
     data = camera.model_dump()

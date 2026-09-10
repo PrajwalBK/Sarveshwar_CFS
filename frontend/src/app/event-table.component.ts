@@ -4,10 +4,27 @@ import { GateEvent } from './gate-api.service';
 
 @Component({
   selector: 'gate-event-table', standalone: true, imports: [DatePipe],
-  template: `<div class="table-scroll"><table><thead><tr><th>Time</th><th>Container number</th><th>Lane</th><th>Movement</th><th>Processing status</th><th>Evidence & Actions</th></tr></thead>
+  template: `<div class="table-scroll"><table><thead><tr>
+    <th>Time</th>
+    <th>Container number</th>
+    <th>Size / Feet</th>
+    <th>Lane</th>
+    <th>Movement</th>
+    <th>Status</th>
+    <th>Evidence & Actions</th>
+  </tr></thead>
   <tbody>@for (event of events(); track event.id) {<tr>
     <td>{{ event.timestamp | date:'dd MMM, HH:mm:ss' }}</td>
     <td class="mono font-bold">{{ event.container_number || 'Unread / unconfirmed' }}</td>
+    <td>
+      @if (event.container_size) {
+        <span class="size-pill" [class.feet]="event.container_size.includes('FT')">
+          📏 {{ event.container_size }}{{ event.size_code ? ' (' + event.size_code + ')' : '' }}
+        </span>
+      } @else {
+        <span class="subtle-dash">—</span>
+      }
+    </td>
     <td>{{ event.gate_id }}</td>
     <td><span class="badge movement-badge">{{ event.event_type }}</span></td>
     <td><span class="badge" [class.good]="event.status === 'CONFIRMED'" [class.warn]="event.status === 'NEEDS_REVIEW'">{{ event.status.replaceAll('_', ' ') }}</span></td>
@@ -19,7 +36,7 @@ import { GateEvent } from './gate-api.service';
         </a>
       </div>
     </td>
-  </tr>} @empty {<tr><td colspan="6" class="empty">No events match this view. Events appear after sufficient detection and OCR evidence.</td></tr>}</tbody></table></div>`
+  </tr>} @empty {<tr><td colspan="7" class="empty">No events match this view. Events appear after sufficient detection and OCR evidence.</td></tr>}</tbody></table></div>`
 })
 export class EventTableComponent {
   events = input<GateEvent[]>([]);

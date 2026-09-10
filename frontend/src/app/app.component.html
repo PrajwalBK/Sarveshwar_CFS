@@ -58,11 +58,21 @@
 
       <div class="workspace-layout">
         <div class="gate-workspace">
+          <section class="input-summary" aria-label="Camera discovery">
+            <div><strong>Automatic camera discovery</strong><small role="status">{{ discovery().message }}</small>
+              <small>New cameras fill unused views. Choose their position and gate direction below.</small></div>
+            <button (click)="rescan()" [disabled]="!!error() || discovery().state === 'SEARCHING' || discovery().state === 'DISABLED'">Search again</button>
+          </section>
+          @for (source of cameraSources(); track source.id) {
+            @if (source.discovered && !source.configured) {
+              <p class="alert warn">{{ source.name }}: {{ source.connection_hint }}. Set the camera ONVIF credentials in backend configuration.</p>
+            }
+          }
           <section class="input-summary">
             <div>
               <span class="mode-dot"></span>
               <strong>Manual video testing</strong>
-              <small>{{ videoCount() }} of 4 slots have videos · {{ playingCount() }} playing</small>
+              <small>{{ videoCount() }} of {{ cameras().length }} slots have videos · {{ playingCount() }} playing</small>
             </div>
             <button class="primary" (click)="playAll()" [disabled]="videoCount() === 0 || !!error()">
               ▶ Play all videos
@@ -74,7 +84,7 @@
               <h2>Camera inputs</h2>
               <p>MP4, AVI, MOV, MKV, WEBM · up to {{ health()?.max_upload_mb ?? 2048 }} MB per file</p>
             </div>
-            <span class="subtle">4 INDEPENDENT VIEWS</span>
+            <span class="subtle">{{ cameras().length }} INDEPENDENT VIEWS</span>
           </div>
 
           @if (loading()) {
@@ -92,12 +102,13 @@
             (upload)="uploadVideo($event)"
             (control)="playback($event)"
             (sourceChange)="selectCamera($event)"
+            (roleChange)="setCameraRole($event)"
           />
 
           <div class="processing-strip">
             <div>
               <strong>AI event processing</strong>
-              <small>{{ health()?.pipeline_enabled ? 'Detection and OCR use the configured models.' : 'Video playback is available. Enable AI when models and MySQL are configured.' }}</small>
+              <small>{{ health()?.pipeline_enabled ? 'Detection and OCR use the configured models.' : 'Video playback is available. Enable AI when models and the local database are ready.' }}</small>
               @if (health()?.models?.error_type) {
                 <small class="error-text">Model loading failed: {{ health()?.models?.error_type }}. Check model configuration.</small>
               }

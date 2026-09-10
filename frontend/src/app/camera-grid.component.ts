@@ -1,9 +1,10 @@
 import { Component, input, output } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
+import { LivePreviewComponent } from './live-preview.component';
 import { Camera, CameraSource, PlaybackAction, UploadState } from './gate-api.service';
 
 @Component({
-  selector: 'gate-camera-grid', standalone: true, imports: [DecimalPipe],
+  selector: 'gate-camera-grid', standalone: true, imports: [DecimalPipe, LivePreviewComponent],
   template: `
   <div class="camera-grid">
     @for (camera of cameras(); track camera.id; let index = $index) {
@@ -12,12 +13,20 @@ import { Camera, CameraSource, PlaybackAction, UploadState } from './gate-api.se
           <span class="badge" [class.good]="camera.status === 'ONLINE'" [class.warn]="camera.status === 'RECONNECTING'">{{ camera.source_type === 'file' ? camera.playback_status : camera.status }}</span></div>
         <label class="source-selector"><span>Camera source</span><select [disabled]="!!busy()[camera.id] || stale()" (change)="selectSource($event, camera.id)">
           <option value="" disabled [selected]="!camera.active_source_id">Select a camera</option>
-          @for (source of cameraSources(); track source.id) {<option [value]="source.id" [selected]="source.id === camera.active_source_id">{{ source.name }}{{ source.configured ? '' : ' — not configured' }}</option>}
+          @for (source of cameraSources(); track source.id) {<option [value]="source.id" [selected]="source.id === camera.active_source_id">{{ source.name }}{{ source.configured ? '' : source.discovered ? ' — needs setup' : ' — not configured' }}</option>}
+        </select></label>
+        <label class="source-selector"><span>Position</span><select [disabled]="!!busy()[camera.id] || stale()" (change)="roleChange.emit({id: camera.id, role: $any($event.target).value, direction: camera.direction})">
+          @for (role of roles; track role.value) {<option [value]="role.value" [selected]="role.value === camera.role">{{ role.label }}</option>}
+        </select></label>
+        <label class="source-selector"><span>Gate direction</span><select [disabled]="!!busy()[camera.id] || stale()" (change)="roleChange.emit({id: camera.id, role: camera.role, direction: $any($event.target).value})">
+          <option value="UNKNOWN" [selected]="camera.direction === 'UNKNOWN'">Unassigned</option>
+          <option value="ENTRY" [selected]="camera.direction === 'ENTRY'">Gate IN</option>
+          <option value="EXIT" [selected]="camera.direction === 'EXIT'">Gate OUT</option>
         </select></label>
         <div class="camera-frame" (dragover)="$event.preventDefault()" (drop)="drop($event, camera.id)">
           <span class="source-tag">{{ camera.source_type === 'file' ? 'VIDEO FILE' : 'CAMERA INPUT' }}</span>
           @if (camera.has_frame && !stale()) {
-            <img [src]="'/api/cameras/' + camera.id + '/stream'" [alt]="camera.name + ' live stream'" (error)="$any($event.target).src = '/api/cameras/' + camera.id + '/frame?t=' + refreshToken()">
+            <gate-live-preview [cameraId]="camera.id" [name]="camera.name" />
           } @else {
             <div class="offline-frame"><svg width="34" height="28" viewBox="0 0 34 28" fill="none" aria-hidden="true"><rect x="2" y="6" width="23" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="m25 12 7-4v14l-7-4M9 6V3h9v3" stroke="currentColor" stroke-width="1.5"/></svg><strong>{{ stale() ? 'Backend disconnected' : 'No camera connected' }}</strong><small>Drop a recorded video here to test this view</small></div>
           }
@@ -36,10 +45,12 @@ import { Camera, CameraSource, PlaybackAction, UploadState } from './gate-api.se
         </div>
         <dl class="camera-stats"><div><dt>CAPTURE</dt><dd>{{ camera.capture_fps | number:'1.1-1' }} <span>fps</span></dd></div><div><dt>INFERENCE</dt><dd>{{ inferenceFps()[camera.id] ?? 0 | number:'1.1-1' }} <span>fps</span></dd></div><div><dt>DROPPED</dt><dd>{{ camera.dropped_frames }}</dd></div></dl>
       </article>
-    } @empty { <p class="empty">Loading the four input slots…</p> }
+    } @empty { <p class="empty">Loading camera views…</p> }
   </div>`
 })
 export class CameraGridComponent {
+  roles = [{value: 'UNASSIGNED', label: 'Unassigned'}, {value: 'FRONT_TOP', label: 'Front / Top'}, {value: 'LEFT', label: 'Left'}, {value: 'RIGHT', label: 'Right'}, {value: 'REAR', label: 'Rear'}];
+  roleChange = output<{id: string; role: string; direction: string}>();
   cameras = input<Camera[]>([]);
   cameraSources = input<CameraSource[]>([]);
   inferenceFps = input<Partial<Record<string, number>>>({});

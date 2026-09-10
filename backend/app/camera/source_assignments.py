@@ -6,8 +6,8 @@ import threading
 
 
 class SourceAssignments:
-    def __init__(self, root):
-        self.path = Path(root).resolve() / 'camera-selections.json'
+    def __init__(self, root, filename='camera-selections.json'):
+        self.path = Path(root).resolve() / filename
         self.lock = threading.Lock()
         try:
             value = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}

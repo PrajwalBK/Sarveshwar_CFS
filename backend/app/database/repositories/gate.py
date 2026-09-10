@@ -197,6 +197,25 @@ class GateRepository:
         with self.db.sessions() as session:
             total = session.scalar(select(func.count()).select_from(query.subquery()))
             items = [serialize(e) for e in session.scalars(query.order_by(GateEvent.timestamp.desc(), GateEvent.id).limit(limit).offset(offset))]
+            from app.ocr.validator import parse_feet_size
+            import re
+            for item in items:
+                dets = list(session.scalars(select(DetectionRecord).where(DetectionRecord.event_id == item['id'])))
+                has_feet = any(d.class_name.lower() == 'feet' for d in dets)
+                ocrs = list(session.scalars(select(OCRResult).where(OCRResult.detection_id.in_([d.id for d in dets])))) if dets else []
+                parsed_size = None
+                size_code = None
+                for o in ocrs:
+                    text_to_check = f"{o.normalized_text} {o.raw_text}"
+                    parsed = parse_feet_size(text_to_check)
+                    if parsed:
+                        parsed_size = parsed
+                        m = re.search(r'(?<![A-Z0-9])([1-4LMN][0-9][GVRHBUTP][0-9A-Z])(?![A-Z0-9])', text_to_check.upper())
+                        if m:
+                            size_code = m.group(1)
+                        break
+                item['container_size'] = parsed_size or ('FEET' if has_feet else None)
+                item['size_code'] = size_code
             return {'items': items, 'total': total, 'limit': limit, 'offset': offset}
 
     def event(self, event_id):
@@ -210,6 +229,24 @@ class GateRepository:
             result['ocr_results'] = [serialize(o) for o in session.scalars(select(OCRResult).where(
                 OCRResult.detection_id.in_([d.id for d in detections]))) ]
             result['snapshots'] = [serialize(s) for s in session.scalars(select(Snapshot).where(Snapshot.event_id == event_id))]
+            
+            from app.ocr.validator import parse_feet_size
+            import re
+            container_size = None
+            size_code = None
+            for ocr in result['ocr_results']:
+                text_to_check = f"{ocr.get('normalized_text', '')} {ocr.get('raw_text', '')}"
+                parsed = parse_feet_size(text_to_check)
+                if parsed:
+                    container_size = parsed
+                    m = re.search(r'(?<![A-Z0-9])([1-4LMN][0-9][GVRHBUTP][0-9A-Z])(?![A-Z0-9])', text_to_check.upper())
+                    if m:
+                        size_code = m.group(1)
+                    break
+            if not container_size and any(d.get('class_name', '').lower() == 'feet' for d in result['detections']):
+                container_size = 'FEET DETECTED'
+            result['container_size'] = container_size
+            result['size_code'] = size_code
             return result
 
     def ocr_results(self, limit=50, offset=0):

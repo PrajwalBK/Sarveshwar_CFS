@@ -52,6 +52,8 @@ class EasyOCREngine:
             items = sorted(items, key=lambda it: (it[0][0][1] // 30, it[0][0][0]))
 
         combined_text = ' '.join(str(item[1]) for item in items)[:4096]
+        from app.ocr.validator import correct_feet_size_codes
+        combined_text = correct_feet_size_codes(combined_text)
         min_conf = float(min(item[2] for item in items))
         return OCRRead(combined_text, min_conf)
 
@@ -142,6 +144,9 @@ class OlmOCREngine:
                 output_text = code_match.group(1).strip()
             else:
                 output_text = cleaned.strip()
+
+            from app.ocr.validator import correct_feet_size_codes
+            output_text = correct_feet_size_codes(output_text)
 
             has_letters = any(c.isalpha() for c in output_text)
             has_digits = any(c.isdigit() for c in output_text)

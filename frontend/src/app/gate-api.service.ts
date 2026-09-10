@@ -3,6 +3,7 @@ import { HttpClient, HttpErrorResponse, HttpHeaders, HttpParams, HttpRequest } f
 import { catchError, of, throwError } from 'rxjs';
 
 export interface Camera {
+  role: string;
   id: string; name: string; gate_id: string; direction: string; source_type: string; source_env: string;
   status: 'ONLINE' | 'OFFLINE' | 'RECONNECTING' | 'ERROR'; reason: string;
   capture_fps: number; dropped_frames: number; reconnect_count: number; last_frame_at: string | null;
@@ -12,8 +13,9 @@ export interface Camera {
   video: {filename: string; size_bytes: number; duration_seconds: number | null; active: boolean} | null;
   active_source_id: string | null; active_source_name: string | null;
 }
-export interface CameraSource { id: string; name: string; configured: boolean; }
-export interface GateEvent { id: string; gate_id: string; timestamp: string; container_number: string | null; event_type: string; status: string; }
+export interface CameraSource { id: string; name: string; configured: boolean; discovered?: boolean; connection_hint?: string; }
+export interface DiscoveryStatus { state: string; found: number; message: string; }
+export interface GateEvent { id: string; gate_id: string; timestamp: string; container_number: string | null; event_type: string; status: string; container_size?: string | null; size_code?: string | null; }
 export interface Detection { id?: string; camera_id: string; class_name: string; confidence: number; bbox: number[]; timestamp?: string; frame_timestamp?: string; track_id?: number; }
 export interface OCR { id: string; raw_text: string; normalized_text: string; confidence: number; validation_status: string; }
 export interface Snapshot { id: string; camera_id: string; timestamp: string; }
@@ -32,6 +34,9 @@ export class GateApi {
   private http = inject(HttpClient);
   cameras() { return this.http.get<Camera[]>('/api/cameras'); }
   cameraSources() { return this.http.get<CameraSource[]>('/api/cameras/sources/available'); }
+  discoveryStatus() { return this.http.get<DiscoveryStatus>('/api/cameras/discovery/status'); }
+  rescan() { return this.http.post('/api/cameras/discovery/rescan', {}); }
+  cameraRole(id: string, role: string, direction: string) { return this.http.post(`/api/cameras/${encodeURIComponent(id)}/role`, {role, direction}); }
   selectCamera(id: string, sourceId: string) { return this.http.post(`/api/cameras/${encodeURIComponent(id)}/source`, {source_id: sourceId}); }
   health() { return this.http.get<Health>('/api/health').pipe(catchError((error: HttpErrorResponse) =>
     error.status === 503 && error.error?.database ? of(error.error as Health) : throwError(() => error))); }

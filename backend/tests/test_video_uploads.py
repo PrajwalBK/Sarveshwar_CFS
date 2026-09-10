@@ -34,8 +34,9 @@ def test_camera_source_dropdown_switches_slot_and_hides_rtsp(settings, repositor
     with TestClient(create_app(settings, repository.db, [camera], camera_sources=sources)) as client:
         available = client.get('/api/cameras/sources/available')
         assert available.status_code == 200
-        assert available.json() == [{'id': 'poe-entrance', 'name': 'PoE entrance', 'configured': True},
-                                    {'id': 'poe-side', 'name': 'PoE side', 'configured': False}]
+        assert [{k: s[k] for k in ('id', 'name', 'configured')} for s in available.json()] == [
+            {'id': 'poe-entrance', 'name': 'PoE entrance', 'configured': True},
+            {'id': 'poe-side', 'name': 'PoE side', 'configured': False}]
         assert 'private-password' not in available.text
         assert upload(client, camera.id, video_bytes).status_code == 200
         response = client.post(f'/api/cameras/{camera.id}/source', json={'source_id': 'poe-side'})

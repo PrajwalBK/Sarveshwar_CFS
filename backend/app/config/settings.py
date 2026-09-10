@@ -16,6 +16,7 @@ class CameraConfig(BaseModel):
     gate_id: str = Field(max_length=64, min_length=1)
     source_env: str = Field(pattern=r'^[A-Z][A-Z0-9_]+$', max_length=100)
     source_type: Literal['rtsp', 'file'] = 'rtsp'
+    role: Literal['UNASSIGNED', 'FRONT_TOP', 'LEFT', 'RIGHT', 'REAR'] = 'UNASSIGNED'
     enabled: bool = True
     direction: Direction = 'UNKNOWN'
     capture_fps: float = Field(default=15, gt=0, le=120)
@@ -48,7 +49,7 @@ class CameraSourceConfig(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', extra='ignore')
     deployment_mode: Literal['development', 'edge', 'test'] = 'development'
-    database_url: SecretStr = SecretStr('mysql+pymysql://gate:gate@127.0.0.1:3306/gate_module')
+    database_url: SecretStr = SecretStr('sqlite+pysqlite:///data/gate.db')
     cameras_file: Path = Path('config/cameras.yaml')
     pipeline_enabled: bool = True
     model_backend: Literal['pytorch', 'onnx', 'tensorrt'] = 'pytorch'
@@ -72,11 +73,16 @@ class Settings(BaseSettings):
     ocr_max_attempts: int = Field(default=4, ge=1)
     ocr_interval_seconds: float = Field(default=1, gt=0)
     ocr_queue_size: int = Field(default=8, ge=1, le=100)
+    ocr_spool_max_mb: int = Field(default=10240, ge=1)
     dedup_seconds: float = Field(default=30, gt=0)
     track_ttl_seconds: float = Field(default=5, gt=0)
     snapshot_directory: Path = Path('snapshots')
     upload_directory: Path = Path('uploads')
     max_upload_mb: int = Field(default=2048, ge=1, le=20480)
+    camera_discovery_enabled: bool = True
+    camera_discovery_interval_seconds: int = Field(default=60, ge=15, le=3600)
+    camera_onvif_username: str = ''
+    camera_onvif_password: SecretStr = SecretStr('')
     cors_origins: list[str] = ['http://localhost:4200', 'http://127.0.0.1:4200']
     open_timeout_ms: int = Field(default=5000, ge=100, le=30000)
     read_timeout_ms: int = Field(default=3000, ge=100, le=30000)
@@ -100,8 +106,13 @@ class Settings(BaseSettings):
     def validate_settings(self):
         if self.ocr_max_attempts < self.ocr_confirmations:
             raise ValueError('ocr_max_attempts must cover ocr_confirmations')
-        if self.deployment_mode != 'test' and not self.database_url.get_secret_value().startswith('mysql+pymysql://'):
-            raise ValueError('Use MySQL; SQLite is supported only in test mode')
+        from sqlalchemy.engine import make_url
+        database = make_url(self.database_url.get_secret_value())
+        if database.drivername not in ('sqlite', 'sqlite+pysqlite', 'mysql+pymysql'):
+            raise ValueError('Use a local SQLite file or an explicitly configured MySQL database')
+        if database.drivername.startswith('sqlite') and self.deployment_mode != 'test':
+            if not database.database or database.database == ':memory:' or database.query:
+                raise ValueError('Use a persistent SQLite file without URI query options')
         return self
 
     def cameras(self) -> list[CameraConfig]:

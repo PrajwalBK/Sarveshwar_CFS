@@ -1,4 +1,5 @@
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import logging
@@ -11,6 +12,8 @@ from app.camera.camera_manager import CameraManager
 from app.camera.camera_worker import CameraWorker
 from app.camera.video_library import VideoLibrary
 from app.camera.source_assignments import SourceAssignments
+from app.camera.discovery import probe, stream_uri
+from app.config.settings import CameraSourceConfig
 from app.config.settings import resolve_source
 from app.detection.tracker import TemporalTracker
 from app.detection.yolo_detector import YoloDetector
@@ -22,6 +25,7 @@ from app.metrics import Metrics
 from app.ocr.container_ocr import crop_identification
 from app.ocr.ocr_engine import EasyOCREngine, create_ocr_engine
 from app.ocr.validator import ContainerValidator
+from app.ocr.job_store import OCRJobStore
 
 log = logging.getLogger('gate')
 
@@ -37,6 +41,7 @@ class OCRJob:
     started_at: datetime
     roi: tuple
     all_detections: tuple[Detection, ...] = ()
+    role: str = 'UNASSIGNED'
 
 
 
@@ -50,6 +55,17 @@ class GateRuntime:
         self._sources_by_id = {source.id: source for source in self.camera_sources}
         self._default_source_by_slot = {camera.id: source.id for camera, source in zip(cameras, self.camera_sources)}
         self.source_assignments = SourceAssignments(settings.upload_directory)
+        self.role_assignments = SourceAssignments(settings.upload_directory, 'camera-roles.json')
+        self._registry_lock = threading.RLock()
+        self._discovered = {}
+        self._discovery_wake = threading.Event()
+        self.discovery_status = {'state': 'WAITING', 'found': 0, 'message': 'Waiting for camera discovery'}
+        for index, camera in enumerate(self.cameras):
+            saved_role = self.role_assignments.get(camera.id)
+            if saved_role:
+                updated = type(camera).model_validate({**camera.model_dump(), **saved_role})
+                self.cameras[index] = updated
+                self.manager.workers[camera.id].config = updated
         self._camera_locks = {c.id: threading.RLock() for c in cameras}
         self._model_lock = threading.Lock()
         self.repository, self.snapshots = repository, snapshots
@@ -61,11 +77,15 @@ class GateRuntime:
         self.validator = ContainerValidator()
         self.tracker = {c.id: TemporalTracker(settings.track_ttl_seconds) for c in cameras}
         self.queue = Queue(maxsize=settings.ocr_queue_size)
+        self.ocr_store = OCRJobStore(settings.upload_directory / 'ocr-spool', settings.ocr_spool_max_mb,
+                                     settings.snapshot_directory / 'ocr-pending')
+        self.ocr_spool_error = None
         self._stop = threading.Event()
-        self._accelerator = threading.Lock()
+        self._accelerator = threading.RLock()
         self._state_lock = threading.Lock()
         self._threads = []
         self._recent = deque(maxlen=300)
+        self._preview_detections = {}
         self._tracks = {}
         self._run_id = str(uuid4())
         self.detector = None
@@ -74,6 +94,9 @@ class GateRuntime:
         self.last_processing_error = None
 
     def start(self):
+        writer = threading.Thread(target=self._save_ocr_loop, name='gate-ocr-save', daemon=True)
+        self._threads.append(writer)
+        writer.start()
         for camera in self.cameras:
             saved = self.videos.info(camera.id)
             if saved and saved.get('active') and self.videos.path(saved['stored_name']).is_file():
@@ -90,6 +113,12 @@ class GateRuntime:
         if self.settings.pipeline_enabled:
             self.start_processing()
         self.dispatcher.start()
+        if self.settings.camera_discovery_enabled and self.settings.deployment_mode != 'test':
+            thread = threading.Thread(target=self._discovery_loop, name='gate-camera-discovery', daemon=True)
+            self._threads.append(thread)
+            thread.start()
+        else:
+            self.discovery_status = {'state': 'DISABLED', 'found': 0, 'message': 'Automatic discovery disabled'}
 
     def start_processing(self):
         with self._model_lock:
@@ -113,8 +142,91 @@ class GateRuntime:
         return result
 
     def available_camera_sources(self):
-        return [{'id': source.id, 'name': source.name, 'configured': bool(resolve_source(source))}
-                for source in self.camera_sources if source.enabled]
+        with self._registry_lock:
+            return [{'id': source.id, 'name': source.name,
+                     'configured': bool(self._source_url(source)),
+                     'discovered': source.id in self._discovered,
+                     'connection_hint': self._discovered.get(source.id, {}).get('status', '')}
+                    for source in self.camera_sources if source.enabled]
+
+    def _source_url(self, source):
+        return self._discovered.get(source.id, {}).get('uri', '') or resolve_source(source)
+
+    def _discovery_loop(self):
+        while not self._stop.is_set():
+            self._discovery_wake.clear()
+            self.discovery_status = {'state': 'SEARCHING', 'found': len(self._discovered), 'message': 'Searching connected networks for cameras…'}
+            try:
+                devices = probe(self._stop)
+                for device in devices:
+                    if self._stop.is_set():
+                        return
+                    try:
+                        device['uri'] = stream_uri(device, self.settings.camera_onvif_username,
+                                                   self.settings.camera_onvif_password.get_secret_value())
+                        device['status'] = 'Stream available'
+                    except Exception:
+                        device['uri'] = ''
+                        device['status'] = 'Found — check ONVIF credentials/settings'
+                    self._register_discovered(device)
+                self.discovery_status = {'state': 'COMPLETE', 'found': len(devices),
+                    'message': f'{len(devices)} cameras found on this scan' if devices else 'No ONVIF cameras found. Check PoE network and camera discovery settings.'}
+            except Exception as exc:
+                log.warning('camera_discovery_failed', extra={'error_type': type(exc).__name__})
+                self.discovery_status = {'state': 'ERROR', 'found': 0, 'message': 'Camera discovery failed; retrying automatically'}
+            self._discovery_wake.wait(self.settings.camera_discovery_interval_seconds)
+
+    def _register_discovered(self, device):
+        with self._registry_lock:
+            if device['id'] not in self._discovered and len(self._discovered) >= 32:
+                return
+            old_uri = self._discovered.get(device['id'], {}).get('uri')
+            self._discovered[device['id']] = device
+            if device['id'] not in self._sources_by_id:
+                source = CameraSourceConfig(id=device['id'], name=device['name'], source_env='DISCOVERED_CAMERA_UNUSED')
+                self.camera_sources.append(source)
+                self._sources_by_id[source.id] = source
+        # Restore stable device IDs after restart; never overwrite operator choices.
+        assigned = [c for c in self.cameras if self.source_assignments.get(c.id) == device['id']]
+        if not device.get('uri'):
+            return
+        for camera in assigned:
+            with self._camera_locks[camera.id]:
+                worker = self.manager.workers[camera.id]
+                if worker.config.source_type != 'file' and old_uri != device['uri']:
+                    self._install_camera_source(camera.id, device['id'], persist=False)
+        if assigned:
+            return
+        from urllib.parse import urlsplit
+        if any(urlsplit(resolve_source(source)).hostname == device['host']
+               for source in self.camera_sources if source.id not in self._discovered):
+            return  # Existing configured camera already owns its view.
+        for camera in list(self.cameras):
+            with self._camera_locks[camera.id]:
+                worker = self.manager.workers[camera.id]
+                if (self.source_assignments.get(camera.id) or resolve_source(camera)
+                        or worker.config.source_type == 'file' or not camera.enabled):
+                    continue
+                self.configure_role(camera.id, 'UNASSIGNED', 'UNKNOWN')
+                self._install_camera_source(camera.id, device['id'], persist=True)
+                break
+
+    def configure_role(self, camera_id, role, direction):
+        with self._camera_locks[camera_id]:
+            index = next(i for i, c in enumerate(self.cameras) if c.id == camera_id)
+            original = self.cameras[index]
+            lane = {'ENTRY': 'lane-in', 'EXIT': 'lane-out', 'UNKNOWN': 'unassigned-' + camera_id}[direction]
+            values = {'role': role, 'direction': direction, 'gate_id': lane,
+                      'name': f"View {index + 1} · {direction} · {role.replace('_', ' ').title()}",
+                      'line_axis': None, 'ocr_roi': (0, 0, 1, 1)}
+            self.role_assignments.set(camera_id, values)
+            updated = original.model_copy(update=values)
+            self.cameras[index] = updated
+            worker = self.manager.workers[camera_id]
+            worker.config = worker.config.model_copy(update=values)
+            worker.source_id = str(uuid4())  # Reject queued observations using previous calibration.
+            worker.take()
+            self.tracker[camera_id] = TemporalTracker(self.settings.track_ttl_seconds)
 
     def select_camera_source(self, camera_id, source_id):
         if source_id not in self._sources_by_id or not self._sources_by_id[source_id].enabled:
@@ -132,7 +244,7 @@ class GateRuntime:
             saved = self.videos.info(camera_id)
             if saved:
                 self.videos.assign(camera_id, {**saved, 'active': False})
-            replacement = CameraWorker(original, resolve_source(source), self.settings, previous.stream_factory)
+            replacement = CameraWorker(original.model_copy(update={'source_type': 'rtsp'}), self._source_url(source), self.settings, previous.stream_factory)
             self.manager.workers[camera_id] = replacement
             self.tracker[camera_id] = TemporalTracker(self.settings.track_ttl_seconds)
             if persist:
@@ -174,6 +286,15 @@ class GateRuntime:
                 self.manager.workers[camera_id].play()
 
     def _process_current(self, camera_id, next_at):
+        # Never take a frame and then wait behind a long GPU OCR call.
+        if not self._accelerator.acquire(blocking=False):
+            return
+        try:
+            self._process_latest(camera_id, next_at)
+        finally:
+            self._accelerator.release()
+
+    def _process_latest(self, camera_id, next_at):
         with self._camera_locks[camera_id]:
             camera = self.manager.workers[camera_id].config
             now = time.monotonic()
@@ -213,6 +334,7 @@ class GateRuntime:
 
     def stop(self):
         self._stop.set()
+        self._discovery_wake.set()
         self.dispatcher.stop()
         cameras_stopped = self.manager.stop()
         for thread in list(self._threads):
@@ -250,6 +372,7 @@ class GateRuntime:
         self.metrics.increment('inferences')
         tracks = self.tracker[camera.id].update(detections, frame.timestamp)
         with self._state_lock:
+            self._preview_detections[camera.id] = (frame.source_id, frame.timestamp, tuple(detections))
             for detection in detections:
                 self._recent.append({**asdict(detection), 'frame_timestamp': detection.frame_timestamp.isoformat() + 'Z'})
             cutoff = self.settings.track_ttl_seconds * 4
@@ -259,9 +382,11 @@ class GateRuntime:
             direction = update_direction(camera, track, frame.image.shape)
             origin = f'{self._run_id}:{camera.id}:{frame.source_id[:12]}:{track.id}'
             with self._state_lock:
-                state = self._tracks.setdefault(origin, {'pending': False, 'done': False, 'last_ocr': 0., 'seen': frame.timestamp})
+                state = self._tracks.setdefault(origin, {'pending': False, 'done': False, 'last_ocr': 0., 'seen': frame.timestamp, 'samples': 0})
                 state['seen'] = frame.timestamp
                 if state['pending'] or state['done'] or time.monotonic() - state['last_ocr'] < self.settings.ocr_interval_seconds:
+                    continue
+                if state.get('samples', 0) >= self.settings.ocr_max_attempts:
                     continue
                 if track.hits < self.settings.min_track_hits:
                     continue
@@ -269,67 +394,90 @@ class GateRuntime:
                     continue
                 if camera.line_axis and direction == 'UNKNOWN':
                     continue
-                job = OCRJob(origin, camera.gate_id, track.id, track.detection, frame, direction, track.first_seen, camera.ocr_roi, tuple(detections))
+                job = OCRJob(origin, camera.gate_id, track.id, track.detection, frame, direction, track.first_seen, camera.ocr_roi, tuple(detections), camera.role)
                 try:
                     self.queue.put_nowait(job)
                     state['pending'] = True
+                    state['samples'] = state.get('samples', 0) + 1
                     state['last_ocr'] = time.monotonic()
                 except Full:
                     self.metrics.increment('ocr_queue_dropped')
 
-    def _ocr_loop(self):
+    def _save_ocr_loop(self):
+        """Disk I/O is isolated from capture and YOLO. Retry the current write."""
         while not self._stop.is_set():
             try:
                 job = self.queue.get(timeout=.2)
             except Empty:
                 continue
             try:
-                if job.frame.source_id != self.manager.workers[job.detection.camera_id].source_id:
-                    continue
                 crop = crop_identification(job.frame.image, job.detection.bbox, job.roi)
-                with self._accelerator:
-                    started = time.monotonic()
-                    read = self.ocr.read(crop)
-                    self.metrics.latency('ocr', time.monotonic() - started)
-                validation = self.validator.validate(read)
-                # Keep the failed event evidence in memory and retry storage. Capture
-                # remains independent; a prolonged DB outage is visible in health.
                 while not self._stop.is_set():
                     try:
-                        with self._camera_locks[job.detection.camera_id]:
-                            if job.frame.source_id != self.manager.workers[job.detection.camera_id].source_id:
-                                break
-                            additional_frames = {}
-                            gate_cam_ids = [c.id for c in self.cameras if c.gate_id == job.gate_id]
-                            for cam_id in gate_cam_ids:
-                                if cam_id == job.detection.camera_id:
-                                    continue
-                                worker = self.manager.workers.get(cam_id)
-                                if worker:
-                                    latest = worker.latest()
-                                    if latest and latest.image is not None:
-                                        additional_frames[cam_id] = latest.image
-                            result = self.events.observe(job, validation, additional_frames=additional_frames)
-                        self.last_processing_error = None
-                        if result:
-                            with self._state_lock:
-                                self._tracks[job.origin_key]['done'] = True
-                            self.metrics.increment('events_created' if result[1] else 'evidence_associated')
-                            self.metrics.latency('event', (utcnow() - job.started_at).total_seconds())
+                        self.ocr_store.save(job, crop)
+                        self.ocr_spool_error = None
+                        self.metrics.increment('ocr_jobs_saved')
+                        with self._state_lock:
+                            if job.origin_key in self._tracks:
+                                self._tracks[job.origin_key]['pending'] = False
                         break
                     except Exception as exc:
-                        self.last_processing_error = type(exc).__name__
-                        self.metrics.increment('event_storage_errors')
-                        log.error('event_storage_failed', extra={'camera_id': job.detection.camera_id, 'error_type': type(exc).__name__})
+                        self.ocr_spool_error = type(exc).__name__
+                        self.metrics.increment('ocr_spool_write_errors')
                         self._stop.wait(1)
             except Exception as exc:
-                self.last_processing_error = type(exc).__name__
-                self.metrics.increment('ocr_errors')
-                log.error('ocr_failed', extra={'camera_id': job.detection.camera_id, 'error_type': type(exc).__name__})
-            finally:
+                self.ocr_spool_error = type(exc).__name__
+                self.metrics.increment('ocr_spool_write_errors')
                 with self._state_lock:
                     if job.origin_key in self._tracks:
                         self._tracks[job.origin_key]['pending'] = False
-                    active = set(self._tracks)
-                self.events.prune(active)
+            finally:
                 self.queue.task_done()
+
+    def _process_saved_ocr(self, job_id):
+        job, crop, validation = self.ocr_store.load(job_id)
+        if validation is None:
+            with self._accelerator if self.settings.ocr_gpu else nullcontext():
+                started = time.monotonic()
+                read = self.ocr.read(crop)
+                self.metrics.latency('ocr', time.monotonic() - started)
+            validation = self.validator.validate(read)
+            self.ocr_store.save_validation(job_id, validation)
+        # Recover confirmation votes from disk, including after a restart.
+        # Saved jobs retain historical source/lane/role; never relabel them to
+        # the currently selected camera or attach current-time companion images.
+        self.events.evidence[job.origin_key] = self.ocr_store.evidence(job.origin_key, self.settings.ocr_max_attempts)
+        try:
+            result = self.events.observe(job, validation)
+            self.ocr_store.complete(job_id, result[0] if result else None)
+        finally:
+            self.events.evidence.pop(job.origin_key, None)
+        with self._state_lock:
+            state = self._tracks.get(job.origin_key)
+            if state:
+                state['pending'] = False
+                state['done'] = bool(result)
+        if result:
+            self.metrics.increment('events_created' if result[1] else 'evidence_associated')
+            self.metrics.latency('event', (utcnow() - job.started_at).total_seconds())
+
+    def _ocr_loop(self):
+        while not self._stop.is_set():
+            job_id = None
+            try:
+                job_id = self.ocr_store.next_id()
+                if job_id is None:
+                    self._stop.wait(.2)
+                    continue
+                self._process_saved_ocr(job_id)
+                self.last_processing_error = None
+            except Exception as exc:
+                self.last_processing_error = type(exc).__name__
+                self.metrics.increment('ocr_job_errors')
+                log.error('saved_ocr_failed', extra={'error_type': type(exc).__name__})
+                if job_id is not None:
+                    try:
+                        self.ocr_store.retry(job_id, type(exc).__name__)
+                    except Exception:
+                        self.ocr_spool_error = 'RetryWriteFailed'
+                self._stop.wait(.2)

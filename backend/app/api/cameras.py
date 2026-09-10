@@ -1,8 +1,56 @@
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from typing import Literal
 
 router = APIRouter(prefix='/api/cameras', tags=['cameras'])
+
+
+def live_jpeg(runtime, camera_id):
+    import cv2
+    cam = runtime.manager.workers[camera_id]
+    frame = cam.latest()
+    if frame is None:
+        return None
+    img = frame.image.copy()
+    with runtime._state_lock:
+        result = runtime._preview_detections.get(camera_id)
+    if result and result[0] == frame.source_id and 0 <= (frame.timestamp - result[1]).total_seconds() <= .3:
+        for detection in result[2]:
+            x1, y1, x2, y2 = map(int, detection.bbox)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (40, 190, 80), 2)
+            cv2.putText(img, f'{detection.class_name} {detection.confidence:.0%}',
+                        (max(5, x1), max(20, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, .55, (40, 190, 80), 2)
+    if img.shape[1] > 640:
+        img = cv2.resize(img, (640, round(img.shape[0] * 640 / img.shape[1])))
+    ok, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    return jpeg.tobytes() if ok else None
+
+
+@router.websocket('/{camera_id}/live')
+async def live(socket: WebSocket, camera_id: str):
+    import asyncio
+    runtime = socket.app.state.runtime
+    origin = socket.headers.get('origin')
+    own_origin = ('https' if socket.url.scheme == 'wss' else 'http') + '://' + socket.url.netloc
+    if origin not in runtime.settings.cors_origins + [own_origin] or camera_id not in runtime.manager.workers:
+        await socket.close(code=1008)
+        return
+    await socket.accept()
+    try:
+        while not runtime._stop.is_set():
+            if await socket.receive_text() != 'next':
+                await socket.close(code=1008)
+                return
+            # Request/response backpressure: no per-client queue of old video frames.
+            jpeg = await asyncio.to_thread(live_jpeg, runtime, camera_id)
+            if jpeg is None:
+                await socket.send_text('waiting')
+            else:
+                await socket.send_bytes(jpeg)
+            await asyncio.sleep(.01)
+    except WebSocketDisconnect:
+        pass
 
 
 def worker(request, camera_id):
@@ -24,6 +72,30 @@ def sources(request: Request):
 
 class SourceSelection(BaseModel):
     source_id: str
+
+
+@router.get('/discovery/status')
+def discovery_status(request: Request):
+    return request.app.state.runtime.discovery_status
+
+
+@router.post('/discovery/rescan')
+def rescan(request: Request):
+    runtime = request.app.state.runtime
+    runtime._discovery_wake.set()
+    return runtime.discovery_status
+
+
+class CameraRole(BaseModel):
+    role: Literal['UNASSIGNED', 'FRONT_TOP', 'LEFT', 'RIGHT', 'REAR']
+    direction: Literal['UNKNOWN', 'ENTRY', 'EXIT']
+
+
+@router.post('/{camera_id}/role')
+def role(camera_id: str, body: CameraRole, request: Request):
+    worker(request, camera_id)
+    request.app.state.runtime.configure_role(camera_id, body.role, body.direction)
+    return {'camera_id': camera_id, 'role': body.role, 'direction': body.direction}
 
 
 @router.post('/{camera_id}/source')
@@ -65,12 +137,15 @@ def preview(camera_id: str, request: Request):
 
 @router.get('/{camera_id}/stream')
 def stream_camera(camera_id: str, request: Request):
-    cam = worker(request, camera_id)
+    worker(request, camera_id)
     runtime = request.app.state.runtime
 
     def frame_generator():
         import cv2, time
         while True:
+            if runtime._stop.is_set():
+                return
+            cam = worker(request, camera_id)
             frame = cam.latest()
             if frame is not None and frame.image is not None:
                 img = frame.image.copy()
@@ -105,5 +180,3 @@ def stream_camera(camera_id: str, request: Request):
             time.sleep(0.04)  # ~25 FPS smooth playback
 
     return StreamingResponse(frame_generator(), media_type='multipart/x-mixed-replace; boundary=frame')
-
-
