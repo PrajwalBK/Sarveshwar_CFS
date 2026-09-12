@@ -43,6 +43,43 @@ def status(camera_id: str, request: Request):
     return worker(request, camera_id).status()
 
 
+@router.get('/{camera_id}/restore')
+def restore_camera(camera_id: str, request: Request):
+    worker(request, camera_id)
+    try:
+        request.app.state.runtime.control_video(camera_id, 'restore-camera')
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {'camera_id': camera_id, 'status': worker(request, camera_id).status()}
+
+
+@router.get('/{camera_id}/test-get')
+def test_camera_get(camera_id: str, request: Request):
+    return worker(request, camera_id).test()
+
+
+@router.get('/test-url')
+def test_custom_url(url: str, transport: str = 'tcp'):
+    import cv2, os
+    os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = f'rtsp_transport;{transport}|stimeout;3000000'
+    try:
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(url)
+        opened = cap.isOpened()
+        ok, frame = (False, None)
+        if opened:
+            ok, frame = cap.read()
+        cap.release()
+        return {
+            'opened': opened,
+            'frame_read': bool(ok and frame is not None),
+            'shape': list(frame.shape) if frame is not None else None
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+
 @router.post('/{camera_id}/test')
 def test_camera(camera_id: str, request: Request):
     return worker(request, camera_id).test()

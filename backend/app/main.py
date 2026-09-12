@@ -37,7 +37,27 @@ def create_app(settings=None, database=None, camera_configs=None, runtime_factor
         app.state.snapshots, app.state.runtime = snapshots, runtime
         app.state.startup_error = None
         try:
-            await asyncio.to_thread(db.check)
+            try:
+                await asyncio.to_thread(db.check)
+            except Exception:
+                # If database schema/tables do not exist, auto-initialize
+                try:
+                    log.info('database_auto_initializing_schema')
+                    await asyncio.to_thread(db.initialize)
+                except Exception as db_err:
+                    # If primary database is unavailable, fallback to local SQLite
+                    db_url = settings.database_url.get_secret_value()
+                    if not db_url.startswith('sqlite') and database is None:
+                        log.warning('database_unavailable_falling_back_to_sqlite', extra={'error': str(db_err)})
+                        db = Database('sqlite+pysqlite:///gate.db')
+                        await asyncio.to_thread(db.initialize)
+                        repository = GateRepository(db)
+                        app.state.database, app.state.repository = db, repository
+                        runtime.repository = repository
+                        runtime.events.repository = repository
+                    else:
+                        raise
+                await asyncio.to_thread(db.check)
             await asyncio.to_thread(repository.sync_cameras, configs)
             log.info('application_started')
         except Exception as exc:

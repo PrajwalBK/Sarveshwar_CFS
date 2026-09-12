@@ -7,6 +7,7 @@ from tests.test_events_database import observation
 
 def test_camera_configuration_events_health_and_snapshot(settings, repository, snapshots, camera, make_job, monkeypatch):
     monkeypatch.delenv('CAMERA_1_RTSP', raising=False)
+    monkeypatch.setattr('app.config.settings.dotenv_values', lambda *a, **kw: {})
     event_id, _ = repository.save_observation(observation(make_job()), snapshots, 30)
     app = create_app(settings, repository.db, [camera])
     with TestClient(app) as client:
@@ -69,3 +70,24 @@ def test_compiled_frontend_is_served_by_backend(settings, repository, camera, tm
         assert page.status_code == 200 and 'Gate UI' in page.text
         asset = client.get('/main.js')
         assert asset.status_code == 200 and 'javascript' in asset.headers['content-type']
+
+
+def test_sync_gate_event_api(settings, repository, snapshots, camera, make_job):
+    from unittest.mock import patch
+    disabled_cam = camera.model_copy(update={'enabled': False})
+    event_id, _ = repository.save_observation(observation(make_job()), snapshots, 30)
+    app = create_app(settings, repository.db, [disabled_cam])
+    with TestClient(app) as client:
+        # If dispatcher disabled
+        client.app.state.runtime.dispatcher.enabled = False
+        res = client.post(f'/api/gate-events/{event_id}/sync')
+        assert res.status_code == 400
+
+        # When enabled and sync succeeds
+        client.app.state.runtime.dispatcher.enabled = True
+        with patch.object(client.app.state.runtime.dispatcher, 'dispatch_event_record', return_value=(True, {'id': 'cfs-sync-1'})):
+            res = client.post(f'/api/gate-events/{event_id}/sync')
+            assert res.status_code == 200
+            assert res.json()['status'] == 'synced'
+            assert res.json()['cloud_response']['id'] == 'cfs-sync-1'
+

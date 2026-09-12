@@ -16,11 +16,22 @@ class OpenCVStream:
         if source_type == 'rtsp':
             if not source.lower().startswith(('rtsp://', 'rtsps://')):
                 raise ValueError('Configured camera source is not RTSP')
-            self.cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG, [
-                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, settings.open_timeout_ms,
-                cv2.CAP_PROP_READ_TIMEOUT_MSEC, settings.read_timeout_ms,
-                cv2.CAP_PROP_BUFFERSIZE, 1,
-            ])
+            open_timeout = int(getattr(settings, 'open_timeout_ms', 5000))
+            read_timeout = int(getattr(settings, 'read_timeout_ms', 3000))
+            timeout_us = open_timeout * 1000
+            os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = f'rtsp_transport;tcp|stimeout;{timeout_us}|timeout;{timeout_us}'
+            clean_source = source.replace('%40', '@')
+            cap_params = []
+            if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
+                cap_params.extend([cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_timeout])
+            if hasattr(cv2, 'CAP_PROP_READ_TIMEOUT_MSEC'):
+                cap_params.extend([cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_timeout])
+            self.cap = cv2.VideoCapture(clean_source, cv2.CAP_FFMPEG, cap_params) if cap_params else cv2.VideoCapture(clean_source, cv2.CAP_FFMPEG)
+            if not self.cap.isOpened():
+                # Fallback to UDP transport if TCP transport is disabled on camera
+                os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = f'rtsp_transport;udp|stimeout;{timeout_us}|timeout;{timeout_us}'
+                self.cap.release()
+                self.cap = cv2.VideoCapture(clean_source, cv2.CAP_FFMPEG, cap_params) if cap_params else cv2.VideoCapture(clean_source, cv2.CAP_FFMPEG)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         else:
             if not Path(source).is_file():

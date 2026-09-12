@@ -2,9 +2,11 @@
 
 The active application is the modular GateVision gate system. In deployment, FastAPI serves the compiled Angular UI so one process starts the UI, API, camera workers and AI runtime.
 
-- `backend/`: FastAPI, camera/video workers, AI pipeline, MySQL persistence and operations APIs.
+- `backend/`: FastAPI, camera/video workers, AI pipeline, persistence and operations APIs.
 - `frontend/`: Angular operations dashboard.
-- `docs/brain.md`: complete architecture and operating flow.
+- `docs/PROJECT_ARCHITECTURE_AND_WORKFLOW.md`: High-level concept, beginner ABCs, and operational workflow guide.
+- `docs/DEVELOPER_PIPELINE_DEEP_DIVE.md`: Low-level developer reference (threading, YOLO, OlmOCR, ISO 6346, database, observability).
+- `docs/brain.md`: Complete operating flow and original architecture specification.
 
 The former root `app/` Python application has been retired and removed. Remaining legacy folders are not part of the active Gate Module.
 

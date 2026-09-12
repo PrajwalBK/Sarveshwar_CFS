@@ -70,7 +70,7 @@ class CameraWorker:
         else:
             self.start()
 
-    def join(self, timeout=10):
+    def join(self, timeout=2):
         if self._thread:
             self._thread.join(timeout)
         return not self._thread or not self._thread.is_alive()

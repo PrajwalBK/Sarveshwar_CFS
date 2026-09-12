@@ -62,7 +62,8 @@ class GateRuntime:
         self.tracker = {c.id: TemporalTracker(settings.track_ttl_seconds) for c in cameras}
         self.queue = Queue(maxsize=settings.ocr_queue_size)
         self._stop = threading.Event()
-        self._accelerator = threading.Lock()
+        self._detector_lock = threading.Lock()
+        self._ocr_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._threads = []
         self._recent = deque(maxlen=300)
@@ -216,7 +217,7 @@ class GateRuntime:
         self.dispatcher.stop()
         cameras_stopped = self.manager.stop()
         for thread in list(self._threads):
-            thread.join(timeout=10)
+            thread.join(timeout=2)
         clean = cameras_stopped and not any(t.is_alive() for t in self._threads)
         if not clean:
             log.error('worker_shutdown_timeout')
@@ -242,7 +243,7 @@ class GateRuntime:
             self._stop.wait(.005)
 
     def process_frame(self, camera, frame):
-        with self._accelerator:
+        with self._detector_lock:
             started = time.monotonic()
             detections = self.detector.detect(frame)
             self.metrics.latency('inference', time.monotonic() - started)
@@ -287,7 +288,7 @@ class GateRuntime:
                 if job.frame.source_id != self.manager.workers[job.detection.camera_id].source_id:
                     continue
                 crop = crop_identification(job.frame.image, job.detection.bbox, job.roi)
-                with self._accelerator:
+                with self._ocr_lock:
                     started = time.monotonic()
                     read = self.ocr.read(crop)
                     self.metrics.latency('ocr', time.monotonic() - started)

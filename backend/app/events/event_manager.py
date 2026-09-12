@@ -42,7 +42,7 @@ class EventManager:
         confirmed = count >= self.settings.ocr_confirmations and not tied
         if not confirmed and len(evidence.reads) < self.settings.ocr_max_attempts:
             return None
-        selected = max((r for r in good if r.normalized_text == best), key=lambda r: r.confidence) if confirmed else validation
+        selected = max((r for r in good if r.normalized_text == best), key=lambda r: r.confidence) if confirmed and good else validation
         obs = Observation(job.origin_key, job.gate_id, job.track_id, job.detection, selected,
                           job.direction, job.frame.image, job.started_at, confirmed,
                           all_detections=list(getattr(job, 'all_detections', [])))
@@ -52,7 +52,7 @@ class EventManager:
         )
         evidence.event_id = event_id
         if self.dispatcher and obs.confirmed:
-            self.dispatcher.enqueue(obs, event_id)
+            self.dispatcher.enqueue(obs, event_id, additional_frames=additional_frames)
         log.info('gate_event_created' if created else 'gate_evidence_associated',
                  extra={'camera_id': job.detection.camera_id, 'event_id': event_id})
         return event_id, created

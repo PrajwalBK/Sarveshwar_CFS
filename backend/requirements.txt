@@ -7,3 +7,15 @@ PyYAML>=6,<7
 numpy>=1.26,<3
 opencv-python-headless>=4.10,<5
 psutil>=5.9,<8
+requests>=2.31,<3
+
+# Development & Testing
+pytest>=8,<10
+httpx>=0.27,<1
+
+# AI & OCR Pipeline
+ultralytics>=8.3,<9
+easyocr>=1.7,<2
+transformers>=4.45,<6
+accelerate>=0.26,<2
+qwen-vl-utils>=0.0.8,<1

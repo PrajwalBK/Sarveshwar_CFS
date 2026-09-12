@@ -32,6 +32,22 @@ def event_json(event_id: str, request: Request):
     return FileResponse(json_path, media_type='application/json', filename=f'event_{event_id}.json')
 
 
+@router.post('/gate-events/{event_id}/sync')
+def sync_event(event_id: str, request: Request):
+    """Manually dispatch and synchronize a saved gate event to the CFS Smart Yard cloud API."""
+    result = request.app.state.repository.event(event_id)
+    if result is None:
+        raise HTTPException(404, 'Event not found')
+    dispatcher = getattr(getattr(request.app.state, 'runtime', None), 'dispatcher', None)
+    if not dispatcher or not dispatcher.enabled:
+        raise HTTPException(400, 'Prosper cloud sync is not enabled in backend configuration')
+    success, resp = dispatcher.dispatch_event_record(result, request.app.state.snapshots)
+    if not success:
+        raise HTTPException(502, f"Failed to sync event to CFS Cloud: {resp.get('error', 'Unknown error')}")
+    return {'status': 'synced', 'event_id': event_id, 'cloud_response': resp}
+
+
+
 
 @router.get('/ocr-results')
 def ocr_results(request: Request, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):

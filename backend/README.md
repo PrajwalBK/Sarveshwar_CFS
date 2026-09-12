@@ -8,7 +8,7 @@ Use Python 3.11+ and a virtual environment. Install the right PyTorch distributi
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
@@ -38,7 +38,7 @@ Camera dropdown choices come from `camera_sources`, while the selected source pe
 ## Enable AI and cameras
 
 1. Add each physical PoE camera under `camera_sources` in `config/cameras.yaml`, using a friendly ID/name and the name of its environment variable. Put the corresponding RTSP URLs in `.env` (`CAMERA_1_RTSP` through `CAMERA_4_RTSP` are included as examples). The four entries under `cameras` are logical viewing/processing slots with their own lane, direction, rate and ROI settings. A source may be selected for any slot from its dashboard dropdown. Blank sources are labelled “not configured” and report OFFLINE.
-2. Install `requirements-ai.txt`. Choose `MODEL_PATH`, `MODEL_BACKEND` and `MODEL_DEVICE` explicitly. The existing checkpoint can be selected at `../runs/detect/gate_detector/weights/best.pt`. Verify its actual label metadata; examples of aliases are not proof that a class is a whole container. Remove incorrect aliases instead of relabeling physical objects blindly.
+2. Install `requirements.txt`. Choose `MODEL_PATH`, `MODEL_BACKEND` and `MODEL_DEVICE` explicitly. The existing checkpoint can be selected at `../runs/detect/gate_detector/weights/best.pt`. Verify its actual label metadata; examples of aliases are not proof that a class is a whole container. Remove incorrect aliases instead of relabeling physical objects blindly.
 3. Set `OCR_ENGINE=easyocr`. To provision EasyOCR weights on a connected development machine, temporarily set `OCR_DOWNLOAD_ENABLED=true`; then keep the downloaded `models/easyocr` directory for offline startup. Set `OCR_GPU` and `MODEL_DEVICE` according to available hardware.
 4. Set `PIPELINE_ENABLED=true`, restart and inspect `/api/models` and `/api/health`. Failed model loading is reported without terminating the API. The normal service never substitutes mock detections or downloads a replacement YOLO checkpoint.
 

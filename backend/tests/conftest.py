@@ -13,13 +13,13 @@ from app.snapshots.snapshot_manager import SnapshotManager
 def settings(tmp_path):
     return Settings(_env_file=None, deployment_mode='test', database_url='sqlite+pysqlite:///' + str(tmp_path / 'test.db'),
                     snapshot_directory=tmp_path / 'snapshots', pipeline_enabled=False,
-                    upload_directory=tmp_path / 'uploads',
+                    upload_directory=tmp_path / 'uploads', prosper_enabled=False,
                     ocr_interval_seconds=.001, reconnect_initial_seconds=.01, reconnect_max_seconds=.02)
 
 
 @pytest.fixture
 def camera():
-    return CameraConfig(id='camera-1', name='View 1', gate_id='lane-1', source_env='CAMERA_1_RTSP')
+    return CameraConfig(id='camera-1', name='View 1', gate_id='lane-1', source_env='TEST_CAMERA_1_RTSP')
 
 
 @pytest.fixture

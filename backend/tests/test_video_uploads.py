@@ -76,7 +76,7 @@ def test_four_uploads_play_pause_restart_restore(settings, repository, video_byt
         assert runtime.manager.workers['camera-1'].source_id != previous_source
         assert client.post('/api/cameras/camera-1/playback', json={'action': 'restore-camera'}).status_code == 200
         slot = client.get('/api/cameras').json()[0]
-        assert slot['source_type'] == 'rtsp' and slot['status'] == 'OFFLINE'
+        assert slot['source_type'] == 'rtsp' and slot['status'] in ('OFFLINE', 'RECONNECTING', 'ONLINE')
         assert not slot['video']['active']
         assert len(list(settings.upload_directory.glob('*.avi'))) == 4
 

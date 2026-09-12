@@ -71,7 +71,11 @@ class OlmOCREngine:
         self.torch_dtype = torch.float16 if self.device == 'cuda' else torch.float32
 
         log.info(f'Loading oLmOCR (Qwen2-VL) model {self.model_name} on {self.device}...')
-        self.processor = AutoProcessor.from_pretrained(self.model_name)
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_name,
+            min_pixels=128 * 28 * 28,
+            max_pixels=384 * 28 * 28
+        )
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             self.model_name,
             torch_dtype=self.torch_dtype,
@@ -94,6 +98,12 @@ class OlmOCREngine:
             return OCRRead('', 0.0)
 
         try:
+            h, w = image.shape[:2]
+            max_dim = 640
+            if max(h, w) > max_dim:
+                scale = max_dim / max(h, w)
+                image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
             rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(rgb_image)
 
@@ -120,7 +130,7 @@ class OlmOCREngine:
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=32,
+                    max_new_tokens=24,
                     do_sample=False
                 )
                 generated_ids_trimmed = [

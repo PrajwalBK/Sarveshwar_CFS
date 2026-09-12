@@ -147,3 +147,78 @@ def test_cloud_dispatcher_enqueue_and_sync(mock_settings):
         assert call_payload['eventType'] == 'ENTRY'
         assert call_payload['imageUrl'] == 'https://img.test/1.jpg'
         assert metrics.increment.called
+
+
+def test_map_camera_to_image_type():
+    from app.events.cloud_dispatcher import map_camera_to_image_type
+    assert map_camera_to_image_type('gate-in-1') == 'FRONT'
+    assert map_camera_to_image_type('gate-in-2') == 'LEFT'
+    assert map_camera_to_image_type('gate-in-3') == 'RIGHT'
+    assert map_camera_to_image_type('gate-in-4') == 'REAR'
+    assert map_camera_to_image_type('gate-out-1') == 'FRONT'
+    assert map_camera_to_image_type('gate-out-4') == 'REAR'
+
+
+def test_prosper_session_capture_gate_event(mock_settings):
+    session = ProsperSession(mock_settings)
+    payload = {
+        'visitId': 'VISIT-12345',
+        'eventType': 'GATE_IN',
+        'deviceId': 'EDGE-01',
+        'capturedAt': '2026-09-10T12:00:00Z',
+        'container': {'containerNumber': 'MSCU1234567', 'containerNumberConfidence': 0.98},
+        'images': [],
+    }
+
+    with patch.object(session.session, 'post') as mock_post:
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.content = b'{"id": "cfs-uuid-999"}'
+        mock_post.return_value.json.return_value = {'id': 'cfs-uuid-999'}
+
+        ok, resp = session.capture_gate_event(payload)
+        assert ok is True
+        assert resp.get('id') == 'cfs-uuid-999'
+        assert '/api/gate-events/capture' in mock_post.call_args[0][0]
+
+
+def test_cfs_capture_enqueue_and_sync(mock_settings):
+    cfg = mock_settings.model_copy(update={
+        'prosper_site_id': '',  # CFS mode
+    })
+    metrics = MagicMock()
+    dispatcher = CloudOutboxDispatcher(cfg, metrics=metrics)
+
+    dummy_img = np.zeros((64, 64, 3), dtype=np.uint8)
+    det = Detection(
+        camera_id='gate-in-1',
+        frame_timestamp=utcnow(),
+        class_name='container',
+        confidence=0.95,
+        bbox=(10.0, 10.0, 50.0, 50.0),
+    )
+    val = Validation(raw_text='MSKU 123456-7', normalized_text='MSKU1234567',
+                     confidence=0.95, valid_format=True, valid_check_digit=True,
+                     validation_status='VALID')
+    obs = Observation('origin-1', 'lane-in', 1, det, val, 'ENTRY', dummy_img, utcnow(), confirmed=True)
+    additional = {'gate-in-2': dummy_img}
+
+    with patch.object(dispatcher.session, 'capture_gate_event', return_value=(True, {'id': 'cfs-123'})) as mock_cap:
+        dispatcher.start()
+        dispatcher.enqueue(obs, 'evt-cfs-777', additional_frames=additional)
+
+        for _ in range(20):
+            if dispatcher.queue.empty() and mock_cap.called:
+                break
+            time.sleep(0.05)
+
+        dispatcher.stop()
+
+        assert mock_cap.called
+        captured_payload = mock_cap.call_args[0][0]
+        assert captured_payload['eventType'] == 'GATE_IN'
+        assert captured_payload['container']['containerNumber'] == 'MSKU1234567'
+        assert len(captured_payload['images']) == 2
+        types = {img['imageType'] for img in captured_payload['images']}
+        assert 'FRONT' in types
+        assert 'LEFT' in types
+
